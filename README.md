@@ -11,9 +11,8 @@ on a **BullMQ**/Redis-backed queue.
 ## Table of contents
 
 - [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Setup](#setup)
-- [Running](#running)
+- [Trivy delivery: Docker vs. local binary](#trivy-delivery-docker-vs-local-binary)
+- [Running it](#running-it)
 - [Using the API](#using-the-api)
 - [The OOM self-test](#the-oom-self-test)
 - [Error handling](#error-handling)
@@ -82,32 +81,69 @@ against a report far bigger than that heap limit.
 > incompatible with this project's CommonJS NestJS build. This project pins the last CommonJS
 > releases (`stream-chain@^3.6.3`, `stream-json@1.9.1`) instead of switching build systems.
 
-## Prerequisites
+## Trivy delivery: Docker vs. local binary
+
+The code always calls Trivy the same way - `child_process.spawn('trivy', [...])`
+(`TrivyRunnerService`) - it has no idea whether that binary came from your `PATH` or from inside
+a container. What changes between environments is only *how `trivy` gets onto the machine this
+process runs on*:
+
+- **Bundled in the app's own image (what this repo does for Docker).** `Dockerfile` installs both
+  `git` and `trivy` into the same image as the Node app. At runtime it's the exact same
+  `spawn('trivy', ...)` call as running locally - no extra moving parts.
+- **Installed locally** if you're not using Docker at all (Option 2 below).
+
+Deliberately **not** done: spawning Trivy via `docker run aquasec/trivy ...` from inside the
+service (Docker-outside-of-Docker, needing `/var/run/docker.sock` mounted in). Two reasons:
+
+1. Mounting the Docker socket into a container is effectively root access to the host - real K8s
+   clusters almost universally block it, so it wouldn't reflect how this would actually deploy.
+2. It would undermine the exact thing Bonus C is supposed to prove. If Trivy runs in a sibling
+   container with no memory limit of its own, the `mem_limit: 200m` on the *app* container is only
+   constraining a process that isn't doing the heavy lifting - `trivy fs` writing the huge report
+   and this process reading it back both need to happen **inside** the constrained boundary for
+   the OOM test to mean anything.
+
+## Running it
+
+There are two ways to run this, and the difference is really just "where does the `trivy`
+binary come from."
+
+### Option 1: Docker Compose (recommended - no local Trivy install needed)
+
+`docker-compose.yml` builds the service from `Dockerfile`, which bakes `git` and `trivy` into the
+same image as the Node app (see [Trivy delivery](#trivy-delivery-docker-vs-local-binary) below for
+why it's packaged this way rather than shelling out to `docker run`), and runs it alongside Redis:
+
+```bash
+docker compose up --build
+```
+
+The `app` service also carries Bonus C's constraint - `mem_limit: 200m` / `memswap_limit: 200m` -
+plus `NODE_OPTIONS=--max-old-space-size=150`, mirroring the assignment's own OOM self-test but
+applied to the whole container, not just a local `node` invocation. The GraphQL endpoint is at
+`http://localhost:3000/graphql`.
+
+To pin a specific Trivy version for reproducible builds instead of "whatever's latest at build
+time," uncomment the `args: TRIVY_VERSION:` line in `docker-compose.yml`.
+
+### Option 2: Local Node + local Trivy
+
+Prerequisites:
 
 - Node.js 22+
 - A [Trivy](https://aquasecurity.github.io/trivy/latest/getting-started/installation/) binary on
   your `PATH` (or set `TRIVY_BINARY_PATH` to an absolute path). `brew install trivy` /
   `apt install trivy` / see Trivy's docs for other platforms.
-- Redis, reachable at `REDIS_HOST`/`REDIS_PORT` (a `docker-compose.yml` is provided for this -
-  see below).
 - `git` on your `PATH` (used indirectly via `simple-git`).
-
-## Setup
+- Redis, reachable at `REDIS_HOST`/`REDIS_PORT` - `docker compose up -d redis` starts just that
+  piece if you don't want to install Redis natively either.
 
 ```bash
 npm install
 cp .env.example .env   # defaults are fine for local dev
-```
-
-Start Redis (only external dependency needed for local dev):
-
-```bash
 docker compose up -d redis
-```
 
-## Running
-
-```bash
 npm run build
 npm run start:dev     # watch mode
 # or
@@ -187,6 +223,24 @@ real repo to scan rather than a synthetic fixture):
 npm run start:oom-check   # node --max-old-space-size=150 dist/main.js
 ```
 
+### Containerized version (Bonus C)
+
+`docker compose up --build` already runs the whole service under `mem_limit: 200m` /
+`memswap_limit: 200m` with `NODE_OPTIONS=--max-old-space-size=150` baked into `docker-compose.yml`
+- so submitting a real scan (`startScan` mutation against a real repo URL) through the running
+container **is** the Bonus C self-test: clone, `trivy fs`, and the stream parser all have to fit
+in that 200MB boundary together, not just the parser in isolation. Watch it stay up rather than
+get OOM-killed:
+
+```bash
+docker compose up --build
+docker stats code-guardian-app-1   # watch memory while a scan runs
+```
+
+> Note: the Dockerfile/compose config were written and validated (`docker compose config`) in this
+> session, but not build-and-run end-to-end here - this sandbox doesn't have a Docker daemon
+> available. Worth doing that full run yourself before submitting.
+
 ## Error handling
 
 Every stage of the pipeline (`GitClonerService`, `TrivyRunnerService`,
@@ -246,5 +300,8 @@ temp path never prevents removing the other.
 - [x] Core: async `POST`-equivalent scan mutation, background worker, status query
 - [x] Bonus B: GraphQL API (this is the API - no separate REST layer)
 - [ ] Bonus A: React polling frontend - not yet built
-- [ ] Bonus C: `docker-compose.yml` with `mem_limit` for the app service - `docker-compose.yml`
-      currently only provides Redis for local dev; the app service + memory limit is a follow-up
+- [x] Bonus C: `Dockerfile` (Node + git + trivy in one image) and `docker-compose.yml`'s `app`
+      service with `mem_limit: 200m` / `memswap_limit: 200m`. Config validated with
+      `docker compose config`; a full `docker compose up --build` + real-scan run wasn't done in
+      this session (no Docker daemon available here) - see the note in
+      [The OOM self-test](#the-oom-self-test).

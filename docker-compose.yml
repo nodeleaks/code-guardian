@@ -1,9 +1,11 @@
-# Local development dependencies for Code Guardian.
+# Code Guardian - local/demo stack.
 #
-# This currently provides only Redis (used by BullMQ for the scan queue and
-# as the scan status/results store). The `app` service with its 200MB
-# `mem_limit` (Bonus C) will be added once the core service is verified to
-# run cleanly under `--max-old-space-size` locally - see README.md.
+# `redis` is the queue + status store BullMQ/ScanRepository need.
+# `app` is the service itself, built from the Dockerfile (Node + git + trivy
+# baked into one image - see Dockerfile comments for why). Its `mem_limit:
+# 200m` is Bonus C: proof the streaming pipeline holds up under the same
+# kind of constraint the assignment describes (a small K8s pod), not just
+# via `--max-old-space-size` on a developer machine.
 services:
   redis:
     image: redis:7-alpine
@@ -14,3 +16,36 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # args:
+      #   TRIVY_VERSION: v0.56.2   # uncomment + pin for reproducible builds
+    ports:
+      - '3000:3000'
+    environment:
+      PORT: '3000'
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      TRIVY_BINARY_PATH: trivy
+      SCAN_RECORD_TTL_SECONDS: '86400'
+      # Mirrors the assignment's `node --max-old-space-size=150` self-test:
+      # cap the V8 heap explicitly rather than relying on V8's own
+      # (not always conservative) auto-detection of the cgroup limit, and
+      # leave headroom under the 200m container limit for RSS outside the
+      # heap (native buffers, the `git`/`trivy` child processes, etc.).
+      NODE_OPTIONS: '--max-old-space-size=150'
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Verify your stream logic actually works! Same intent as the
+    # assignment's `node --max-old-space-size=150` self-test, applied at the
+    # container level: the whole process (clone + trivy + stream-parse) has
+    # to fit in 200MB, not just the Node heap.
+    mem_limit: 200m
+    # Equal to mem_limit so the container can't quietly survive by
+    # swapping - without this Docker allows up to 2x mem_limit of swap,
+    # which would mask a real OOM.
+    memswap_limit: 200m
