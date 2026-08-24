@@ -1,0 +1,16 @@
+# Local development dependencies for Code Guardian.
+#
+# This currently provides only Redis (used by BullMQ for the scan queue and
+# as the scan status/results store). The `app` service with its 200MB
+# `mem_limit` (Bonus C) will be added once the core service is verified to
+# run cleanly under `--max-old-space-size` locally - see README.md.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
