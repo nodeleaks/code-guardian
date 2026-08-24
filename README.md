@@ -10,14 +10,20 @@ on a **BullMQ**/Redis-backed queue.
 
 ## Table of contents
 
-- [Architecture](#architecture)
-- [Trivy delivery: Docker vs. local binary](#trivy-delivery-docker-vs-local-binary)
-- [Running it](#running-it)
-- [Using the API](#using-the-api)
-- [The OOM self-test](#the-oom-self-test)
-- [Error handling](#error-handling)
-- [Trade-offs and design notes](#trade-offs-and-design-notes)
-- [Project status / bonuses](#project-status--bonuses)
+- [Code Guardian](#code-guardian)
+  - [Table of contents](#table-of-contents)
+  - [Architecture](#architecture)
+    - [Why memory stays bounded](#why-memory-stays-bounded)
+  - [Trivy delivery: Docker vs. local binary](#trivy-delivery-docker-vs-local-binary)
+  - [Running it](#running-it)
+    - [Option 1: Docker Compose (recommended - no local Trivy install needed)](#option-1-docker-compose-recommended---no-local-trivy-install-needed)
+    - [Option 2: Local Node + local Trivy](#option-2-local-node--local-trivy)
+  - [Using the API](#using-the-api)
+  - [The OOM self-test](#the-oom-self-test)
+    - [Containerized version (Bonus C)](#containerized-version-bonus-c)
+  - [Error handling](#error-handling)
+  - [Trade-offs and design notes](#trade-offs-and-design-notes)
+  - [Project status / bonuses](#project-status--bonuses)
 
 ## Architecture
 
@@ -131,7 +137,7 @@ time," uncomment the `args: TRIVY_VERSION:` line in `docker-compose.yml`.
 
 Prerequisites:
 
-- Node.js 22+
+- Node.js 24+
 - A [Trivy](https://aquasecurity.github.io/trivy/latest/getting-started/installation/) binary on
   your `PATH` (or set `TRIVY_BINARY_PATH` to an absolute path). `brew install trivy` /
   `apt install trivy` / see Trivy's docs for other platforms.
@@ -238,7 +244,7 @@ docker stats code-guardian-app-1   # watch memory while a scan runs
 ```
 
 > Note: the Dockerfile/compose config were written and validated (`docker compose config`) in this
-> session, but not build-and-run end-to-end here - this sandbox doesn't have a Docker daemon
+> session, but not build -and-run end-to-end here - this sandbox doesn't have a Docker daemon
 > available. Worth doing that full run yourself before submitting.
 
 ## Error handling

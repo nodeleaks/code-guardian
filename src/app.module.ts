@@ -14,10 +14,8 @@ import { ScanModule } from './scan/scan.module';
     GraphQLModule.forRootAsync<ApolloDriverConfig>({
       driver: ApolloDriver,
       useFactory: () => ({
-        // Code-first: schema is generated from the @ObjectType/@InputType
-        // classes under src/scan/graphql and src/scan/dto, then written out
-        // so it can be committed/reviewed like any other generated artifact.
-        autoSchemaFile: join(process.cwd(), 'src/schema.gql'),
+        autoSchemaFile:
+          process.env.NODE_ENV === 'production' ? true : join(process.cwd(), 'schema.gql'),
         sortSchema: true,
         playground: true,
       }),

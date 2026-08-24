@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- deps: install ALL dependencies (incl. devDependencies) for the build step ----
-FROM node:22-slim AS deps
+FROM node:24-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -14,13 +14,13 @@ COPY src ./src
 RUN npm run build
 
 # ---- prod-deps: a second, production-only install (no devDependencies) ----
-FROM node:22-slim AS prod-deps
+FROM node:24-slim AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ---- runtime: the actual image that ships ----
-FROM node:22-slim AS runtime
+FROM node:24-slim AS runtime
 WORKDIR /app
 
 # Trivy needs its own binary, and `simple-git` shells out to a real `git`
@@ -46,9 +46,14 @@ COPY --from=build /app/dist ./dist
 COPY package.json ./
 
 # Run as a non-root user. Repo clones and Trivy reports land under the
-# system temp dir (os.tmpdir()) at runtime, so it needs to be writable by
-# this user - /tmp is world-writable by default on node:22-slim.
-RUN useradd --create-home --shell /usr/sbin/nologin appuser
+# system temp dir (os.tmpdir()) at runtime, so that's covered by /tmp being
+# world-writable by default - but /app itself is still owned by root at
+# this point (everything above ran as root), so it's chown'd explicitly too.
+# Without this, anything the app tries to write under its own working
+# directory (e.g. GraphQLModule's autoSchemaFile in non-production configs)
+# fails with EACCES.
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 3000
