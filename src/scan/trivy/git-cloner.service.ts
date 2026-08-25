@@ -8,6 +8,46 @@ import { AppConfig } from '../../config/configuration';
 import { ScanEngineError } from '../../common/errors/scan-engine.error';
 import { directorySizeBytes } from './directory-size';
 
+// simple-git refuses to forward any of these env vars via `.env()` unless
+// the matching `allowUnsafe*` flag is set - they're all ways an environment
+// can redirect what a "git clone" actually does (pager/editor/ssh/proxy
+// overrides, alternate config files). We don't want any of them honored for
+// an automated clone of an untrusted URL anyway, so they're stripped rather
+// than allowed through. Simply not spreading process.env at all isn't an
+// option either: simple-git's .env() *replaces* the child process' env
+// rather than merging with it, so PATH/HOME/etc. would be lost and git
+// itself would stop working.
+const UNSAFE_GIT_ENV_KEYS = new Set([
+  'EDITOR',
+  'GIT_ASKPASS',
+  'GIT_CONFIG',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_EDITOR',
+  'GIT_EXEC_PATH',
+  'GIT_EXTERNAL_DIFF',
+  'GIT_PAGER',
+  'GIT_PROXY_COMMAND',
+  'GIT_SEQUENCE_EDITOR',
+  'GIT_SSH',
+  'GIT_SSH_COMMAND',
+  'GIT_TEMPLATE_DIR',
+  'PAGER',
+  'PREFIX',
+  'SSH_ASKPASS',
+]);
+
+function safeCloneEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && !UNSAFE_GIT_ENV_KEYS.has(key.toUpperCase())) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 /**
  * Clones a repository into a fresh temp directory. Uses a shallow
  * (--depth 1) clone: Trivy's filesystem scanner only needs the working
@@ -35,7 +75,7 @@ export class GitClonerService {
         timeout: { block: this.timeoutMs },
       })
         .env({
-          ...process.env,
+          ...safeCloneEnv(),
           // Without this, a private/nonexistent repo makes git try to
           // acquire credentials. Wherever a TTY is reachable that blocks
           // indefinitely, and since the worker runs one job at a time a

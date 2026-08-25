@@ -84,6 +84,43 @@ describe('GitClonerService', () => {
       expect(passed.GIT_CONFIG_NOSYSTEM).toBe('1');
     });
 
+    it('strips env vars simple-git treats as unsafe (regression: PAGER)', async () => {
+      // simple-git's .env() rejects PAGER, GIT_SSH_COMMAND, GIT_PROXY_COMMAND
+      // etc. with "Use of ... is not permitted without enabling
+      // allowUnsafe*" unless they're absent. Spreading the whole
+      // process.env used to forward these straight through - reproduced
+      // locally by running with PAGER set (common on macOS/zsh outside
+      // Docker's minimal env, which is why this wasn't caught in the
+      // container). Assert the dangerous keys never reach .env(), while an
+      // unrelated var passes through untouched.
+      const originalPager = process.env.PAGER;
+      const originalCustomVar = process.env.CODE_GUARDIAN_TEST_VAR;
+      process.env.PAGER = 'less';
+      process.env.GIT_SSH_COMMAND = 'ssh -o something';
+      process.env.CODE_GUARDIAN_TEST_VAR = 'keep-me';
+
+      try {
+        const env = jest.fn((_vars: Record<string, string>) => ({
+          clone: jest.fn().mockResolvedValue(undefined),
+        }));
+        mockSimpleGit.mockReturnValue(asGit({ env }));
+
+        const result = await service.cloneToTemp('https://github.com/owner/repo');
+        tempDirs.push(result);
+
+        const passed: Record<string, string> = env.mock.calls[0][0];
+        expect(passed.PAGER).toBeUndefined();
+        expect(passed.GIT_SSH_COMMAND).toBeUndefined();
+        expect(passed.CODE_GUARDIAN_TEST_VAR).toBe('keep-me');
+      } finally {
+        if (originalPager === undefined) delete process.env.PAGER;
+        else process.env.PAGER = originalPager;
+        delete process.env.GIT_SSH_COMMAND;
+        if (originalCustomVar === undefined) delete process.env.CODE_GUARDIAN_TEST_VAR;
+        else process.env.CODE_GUARDIAN_TEST_VAR = originalCustomVar;
+      }
+    });
+
     it('rejects with CLONE_FAILED on a generic clone error', async () => {
       stubClone(jest.fn().mockRejectedValue(new Error('fatal: repository not found')));
 
