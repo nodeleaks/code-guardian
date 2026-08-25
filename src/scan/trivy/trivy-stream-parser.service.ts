@@ -89,7 +89,12 @@ export class TrivyStreamParserService {
         pipeline.on('data', (item: StreamArrayItem) => {
           targetsProcessed += 1;
           const result = item.value as TrivyResult;
-          if (!result?.Vulnerabilities?.length) {
+          // Array.isArray rather than `?.length`: a non-array object
+          // carrying a `length` property passes a truthiness check and then
+          // throws on `for...of`. That throw would happen inside this
+          // 'data' listener, escaping the surrounding promise's reject and
+          // surfacing as an uncaught exception instead of a PARSE_FAILED.
+          if (!Array.isArray(result?.Vulnerabilities) || result.Vulnerabilities.length === 0) {
             return;
           }
           for (const vuln of result.Vulnerabilities) {
