@@ -70,6 +70,13 @@ export class ScanRepository {
   }
 
   private async patch(scanId: string, partial: Partial<ScanRecord>): Promise<void> {
+    // Deliberately a plain read-modify-write rather than a Lua script or
+    // WATCH/MULTI. It is safe here because a given scanId only ever has one
+    // writer: ScanService.create() runs before the job is enqueued, and
+    // every subsequent patch comes from the single BullMQ worker that holds
+    // that job's lock, in sequence. Two workers cannot patch the same key.
+    // (A Lua merge would additionally be wrong here - cjson re-encodes an
+    // empty `criticalVulnerabilities: []` as `{}`, corrupting the record.)
     const existing = await this.findById(scanId);
     if (!existing) {
       // The record should always exist by the time the worker patches it

@@ -1,9 +1,13 @@
-# Local development dependencies for Code Guardian.
+# Code Guardian - local/demo stack.
 #
-# This currently provides only Redis (used by BullMQ for the scan queue and
-# as the scan status/results store). The `app` service with its 200MB
-# `mem_limit` (Bonus C) will be added once the core service is verified to
-# run cleanly under `--max-old-space-size` locally - see README.md.
+# `redis` is the queue + status store BullMQ/ScanRepository need.
+# `trivy-db` is a one-shot init container that populates the shared Trivy
+# cache volume before anything else runs.
+# `app` is the service itself, built from the Dockerfile (Node + git + trivy
+# baked into one image - see Dockerfile comments for why). Its `mem_limit:
+# 200m` is: proof the streaming pipeline holds up under the same
+# kind of constraint the assignment describes (a small K8s pod), not just
+# via `--max-old-space-size` on a developer machine.
 services:
   redis:
     image: redis:7-alpine
@@ -14,3 +18,86 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  # Downloading Trivy's vulnerability DB is not a 200MB-scale operation: the
+  # DB is a ~1.3GB bolt file, and extracting it to disk drove the cgroup to
+  # ~1GB in testing. Running that inside `app` is what OOM-killed the whole
+  # container (exit 137) on the first scan after every cold start, because
+  # the cache lived inside the container and was thrown away with it.
+  #
+  # So the download gets its own short-lived container with room to breathe.
+  # It writes into the `trivy-cache` volume, exits, and `app` then scans with
+  # TRIVY_SKIP_DB_UPDATE=true - which costs ~47MB and fits inside 200m with
+  # plenty of headroom. Re-running `docker compose up` re-runs this service;
+  # Trivy skips the download if the cached DB is still fresh.
+  trivy-db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # `image` is shared with `app` so the (identical) build is only done once.
+    image: code-guardian-app
+    command:
+      [
+        'trivy',
+        'fs',
+        '--download-db-only',
+        '--cache-dir',
+        '/trivy-cache',
+        '--quiet',
+      ]
+    volumes:
+      - trivy-cache:/trivy-cache
+    mem_limit: 1500m
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # args:
+      #   TRIVY_VERSION: v0.56.2   # uncomment + pin for reproducible builds
+    image: code-guardian-app
+    ports:
+      - '3000:3000'
+    environment:
+      PORT: '3000'
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      TRIVY_BINARY_PATH: trivy
+      SCAN_RECORD_TTL_SECONDS: '86400'
+      # The DB is already on the shared volume, put there by `trivy-db`.
+      # Without this, every scan would try to refresh it in-process and blow
+      # straight through the 200m limit below.
+      TRIVY_CACHE_DIR: /trivy-cache
+      TRIVY_SKIP_DB_UPDATE: 'true'
+      # This is an explicitly local/demo stack, so the Apollo explorer (and
+      # the introspection it needs) is turned on here. It defaults to OFF in
+      # code - relying on NODE_ENV alone previously left it exposed on any
+      # run path that didn't happen to set it.
+      GRAPHQL_PLAYGROUND: 'true'
+      # Mirrors the assignment's `node --max-old-space-size=150` self-test:
+      # cap the V8 heap explicitly rather than relying on V8's own
+      # (not always conservative) auto-detection of the cgroup limit, and
+      # leave headroom under the 200m container limit for RSS outside the
+      # heap (native buffers, the `git`/`trivy` child processes, etc.).
+      NODE_OPTIONS: '--max-old-space-size=150'
+    depends_on:
+      redis:
+        condition: service_healthy
+      trivy-db:
+        condition: service_completed_successfully
+    volumes:
+      - trivy-cache:/trivy-cache
+    # Verify your stream logic actually works! Same intent as the
+    # assignment's `node --max-old-space-size=150` self-test, applied at the
+    # container level: the whole process (clone + trivy + stream-parse) has
+    # to fit in 200MB, not just the Node heap.
+    mem_limit: 200m
+    # Equal to mem_limit so the container can't quietly survive by
+    # swapping - without this Docker allows up to 2x mem_limit of swap,
+    # which would mask a real OOM.
+    memswap_limit: 200m
+
+volumes:
+  # Persists the Trivy vulnerability DB across `docker compose down`/`up`, so
+  # the 1.3GB download happens once rather than on every cold start.
+  trivy-cache:

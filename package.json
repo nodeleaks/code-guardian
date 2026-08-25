@@ -4,6 +4,9 @@
   "description": "Code Guardian - memory-safe backend service wrapping Trivy security scanner (NestJS + GraphQL + BullMQ)",
   "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
@@ -21,6 +24,7 @@
   },
   "dependencies": {
     "@apollo/server": "^5.5.1",
+    "@as-integrations/express5": "^1.1.2",
     "@nestjs/apollo": "^13.4.5",
     "@nestjs/bullmq": "^11.0.5",
     "@nestjs/common": "^11.2.1",
@@ -28,11 +32,13 @@
     "@nestjs/core": "^11.2.1",
     "@nestjs/graphql": "^13.4.5",
     "@nestjs/platform-express": "^11.2.1",
+    "@nestjs/throttler": "^6.5.0",
     "bullmq": "^6.2.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "graphql": "^16.11.0",
     "ioredis": "^6.0.0",
+    "joi": "^18.2.5",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",
     "simple-git": "^3.36.0",
@@ -47,7 +53,7 @@
     "@nestjs/testing": "^11.2.1",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",
-    "@types/node": "^22.10.0",
+    "@types/node": "^26.2.0",
     "@types/stream-chain": "^2.0.4",
     "@types/stream-json": "^1.7.8",
     "@types/uuid": "^10.0.0",

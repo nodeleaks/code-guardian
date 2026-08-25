@@ -6,6 +6,7 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScanEngineError } from '../common/errors/scan-engine.error';
+import { toPublicErrorMessage } from '../common/errors/scan-error-messages';
 import { ScanJobData, ScanStatus, SCAN_QUEUE_NAME } from './interfaces/scan-record.interface';
 import { ScanRepository } from './scan.repository';
 import { GitClonerService } from './trivy/git-cloner.service';
@@ -53,18 +54,23 @@ export class ScanProcessor extends WorkerHost {
         }`,
       );
     } catch (err) {
-      // Covers: clone failure, missing/failing trivy binary, disk full
-      // (ENOSPC surfaces from either the clone or the trivy write step),
-      // and malformed/truncated JSON from the parser. Whatever the cause,
-      // the scan is marked FAILED with a human-readable reason rather than
-      // left stuck in SCANNING or crashing the worker process.
-      const message =
+      // Covers: clone failure, missing/failing trivy binary, timeout,
+      // oversized repo, disk full (ENOSPC surfaces from either the clone or
+      // the trivy write step), and malformed/truncated JSON from the parser.
+      // Whatever the cause, the scan is marked FAILED rather than left stuck
+      // in SCANNING or crashing the worker process.
+      //
+      // Two channels on purpose: the full diagnostic message (subprocess
+      // stderr, absolute temp paths, binary paths) goes to the log, while
+      // only a sanitized code-derived string is persisted - `errorMessage`
+      // is served to anonymous callers over the public GraphQL endpoint.
+      const logMessage =
         err instanceof ScanEngineError
           ? `[${err.code}] ${err.message}`
           : `Unexpected error: ${err instanceof Error ? err.message : String(err)}`;
 
-      this.logger.error(`[${scanId}] Scan failed: ${message}`);
-      await this.scanRepository.markFailed(scanId, message);
+      this.logger.error(`[${scanId}] Scan failed: ${logMessage}`);
+      await this.scanRepository.markFailed(scanId, toPublicErrorMessage(err));
     } finally {
       await this.cleanup(scanId, repoDir, reportFilePath);
     }

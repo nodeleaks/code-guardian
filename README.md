@@ -5,20 +5,27 @@ GitHub repository for vulnerabilities, designed to survive a 500MB+ scan report 
 memory-constrained pod (e.g. a 256MB Kubernetes container) without ever loading that report into
 memory as a whole.
 
-Built with **NestJS**, exposing a **GraphQL** API (Bonus B), with scans processed asynchronously
+Built with **NestJS**, exposing a **GraphQL** API, with scans processed asynchronously
 on a **BullMQ**/Redis-backed queue.
 
 ## Table of contents
 
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Setup](#setup)
-- [Running](#running)
-- [Using the API](#using-the-api)
-- [The OOM self-test](#the-oom-self-test)
-- [Error handling](#error-handling)
-- [Trade-offs and design notes](#trade-offs-and-design-notes)
-- [Project status / bonuses](#project-status--bonuses)
+- [Code Guardian](#code-guardian)
+  - [Table of contents](#table-of-contents)
+  - [Architecture](#architecture)
+    - [Why memory stays bounded](#why-memory-stays-bounded)
+  - [Trivy delivery: Docker vs. local binary](#trivy-delivery-docker-vs-local-binary)
+  - [Running it](#running-it)
+    - [Option 1: Docker Compose (recommended - no local Trivy install needed)](#option-1-docker-compose-recommended---no-local-trivy-install-needed)
+      - [Why there's a separate `trivy-db` service](#why-theres-a-separate-trivy-db-service)
+    - [Option 2: Local Node + local Trivy](#option-2-local-node--local-trivy)
+  - [Configuration](#configuration)
+  - [Using the API](#using-the-api)
+  - [Web UI (`web/`)](#web-ui-web)
+  - [The OOM self-test](#the-oom-self-test)
+    - [Containerized version](#containerized-version)
+  - [Error handling](#error-handling)
+  - [Trade-offs and design notes](#trade-offs-and-design-notes)
 
 ## Architecture
 
@@ -82,39 +89,136 @@ against a report far bigger than that heap limit.
 > incompatible with this project's CommonJS NestJS build. This project pins the last CommonJS
 > releases (`stream-chain@^3.6.3`, `stream-json@1.9.1`) instead of switching build systems.
 
-## Prerequisites
+## Trivy delivery: Docker vs. local binary
 
-- Node.js 22+
+The code always calls Trivy the same way - `child_process.spawn('trivy', [...])`
+(`TrivyRunnerService`) - it has no idea whether that binary came from your `PATH` or from inside
+a container. What changes between environments is only *how `trivy` gets onto the machine this
+process runs on*:
+
+- **Bundled in the app's own image (what this repo does for Docker).** `Dockerfile` installs both
+  `git` and `trivy` into the same image as the Node app. At runtime it's the exact same
+  `spawn('trivy', ...)` call as running locally - no extra moving parts.
+- **Installed locally** if you're not using Docker at all (Option 2 below).
+
+Deliberately **not** done: spawning Trivy via `docker run aquasec/trivy ...` from inside the
+service (Docker-outside-of-Docker, needing `/var/run/docker.sock` mounted in). Two reasons:
+
+1. Mounting the Docker socket into a container is effectively root access to the host - real K8s
+   clusters almost universally block it, so it wouldn't reflect how this would actually deploy.
+2. If Trivy runs in a sibling
+   container with no memory limit of its own, the `mem_limit: 200m` on the *app* container is only
+   constraining a process that isn't doing the heavy lifting - `trivy fs` writing the huge report
+   and this process reading it back both need to happen **inside** the constrained boundary for
+   the OOM test to mean anything.
+
+The `trivy-db` init container isn't an exception to that. It only *downloads* the vulnerability DB
+into a shared volume and exits; it never scans. Every part of the work the OOM test is about - the
+clone, `trivy fs`, and the streaming parse - still happens inside the 200m boundary. See
+[Why there's a separate `trivy-db` service](#why-theres-a-separate-trivy-db-service) for the
+measurements that forced the split.
+
+## Running it
+
+There are two ways to run this, and the difference is really just "where does the `trivy`
+binary come from."
+
+### Option 1: Docker Compose (recommended - no local Trivy install needed)
+
+`docker-compose.yml` builds the service from `Dockerfile`, which bakes `git` and `trivy` into the
+same image as the Node app (see [Trivy delivery](#trivy-delivery-docker-vs-local-binary) below for
+why it's packaged this way rather than shelling out to `docker run`), and runs it alongside Redis:
+
+```bash
+docker compose up --build
+```
+
+The `app` service also carries memory's constraint - `mem_limit: 200m` / `memswap_limit: 200m` -
+plus `NODE_OPTIONS=--max-old-space-size=150`, mirroring the assignment's own OOM self-test but
+applied to the whole container, not just a local `node` invocation. The GraphQL endpoint is at
+`http://localhost:3000/graphql`.
+
+#### Why there's a separate `trivy-db` service
+
+The stack starts a short-lived `trivy-db` container before `app`, using the same image, purely to
+run `trivy fs --download-db-only` into a shared `trivy-cache` volume. `app` then scans with
+`TRIVY_SKIP_DB_UPDATE=true` and never downloads anything itself.
+
+That split exists because *downloading* Trivy's vulnerability DB and *scanning with* it have wildly
+different memory profiles. Measured on this image:
+
+| Phase | Peak container memory |
+| --- | --- |
+| `trivy fs` with a warm cache and `--skip-db-update` | **~47 MB** (succeeds even at `-m 128m`) |
+| `trivy fs` with a cold cache (downloads the DB) | **OOM-killed at 200m and at 512m**; needs ~1 GB |
+
+The DB is a ~1.3 GB bolt file, and extracting it fills the cgroup with dirty page cache faster than
+the kernel can write it back - with `memswap_limit == mem_limit` there's no swap to fall back on, so
+the cgroup OOM killer fires and takes PID 1 (Node) with it. The container dies with **exit code
+137** before the scan even starts.
+
+So the download gets its own container with room to breathe, and the 200m limit on `app` measures
+what it's actually meant to measure: the clone, the scan, and the streaming parse. Because the cache
+lives in a named volume, the 1.3 GB download survives `docker compose down` and happens once, not on
+every cold start. Re-running `docker compose up` re-runs `trivy-db`, which is a no-op while the
+cached DB is still fresh.
+
+To pin a specific Trivy version for reproducible builds instead of "whatever's latest at build
+time," uncomment the `args: TRIVY_VERSION:` line in `docker-compose.yml`.
+
+### Option 2: Local Node + local Trivy
+
+Prerequisites:
+
+- Node.js 24+
 - A [Trivy](https://aquasecurity.github.io/trivy/latest/getting-started/installation/) binary on
   your `PATH` (or set `TRIVY_BINARY_PATH` to an absolute path). `brew install trivy` /
   `apt install trivy` / see Trivy's docs for other platforms.
-- Redis, reachable at `REDIS_HOST`/`REDIS_PORT` (a `docker-compose.yml` is provided for this -
-  see below).
 - `git` on your `PATH` (used indirectly via `simple-git`).
-
-## Setup
+- Redis, reachable at `REDIS_HOST`/`REDIS_PORT` - `docker compose up -d redis` starts just that
+  piece if you don't want to install Redis natively either.
 
 ```bash
 npm install
 cp .env.example .env   # defaults are fine for local dev
-```
-
-Start Redis (only external dependency needed for local dev):
-
-```bash
 docker compose up -d redis
-```
 
-## Running
-
-```bash
 npm run build
 npm run start:dev     # watch mode
 # or
 npm run start:prod    # runs dist/main.js
 ```
 
-The GraphQL endpoint (with the interactive Explorer) is at `http://localhost:3000/graphql`.
+The GraphQL endpoint is at `http://localhost:3000/graphql`.
+
+The interactive Apollo Explorer (and the schema introspection it relies on) is gated behind
+`GRAPHQL_PLAYGROUND` and **defaults to off** - exposing a full schema dump on an
+unauthenticated endpoint isn't something that should depend on remembering to set `NODE_ENV`.
+The Docker Compose stack sets `GRAPHQL_PLAYGROUND=true` for you since it's a local demo; running
+locally via Option 2, set it yourself (`GRAPHQL_PLAYGROUND=true npm run start:dev`) if you want
+the Explorer.
+
+## Configuration
+
+Every setting has a working default - `cp .env.example .env` is enough for local dev. The full
+list lives in `.env.example`; the ones worth knowing about:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP port. |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Queue + status store. |
+| `REDIS_PASSWORD` | *(unset)* | Set for a Redis requiring AUTH. |
+| `REDIS_TLS` | `false` | `true` to connect over TLS (managed Redis usually needs this). |
+| `TRIVY_BINARY_PATH` | `trivy` | Path or command name of the Trivy binary. |
+| `SCAN_RECORD_TTL_SECONDS` | `86400` | How long a finished/failed scan is kept in Redis. |
+| `SCAN_TIMEOUT_MS` | `300000` | Wall-clock cap applied separately to `git clone` and `trivy fs`. |
+| `SCAN_MAX_REPO_SIZE_MB` | `1024` | Reject a cloned tree larger than this before scanning. |
+| `SCAN_MAX_QUEUE_DEPTH` | `100` | Refuse new scans once this many jobs are waiting. |
+| `CORS_ORIGIN` | `http://localhost:5173` | Comma-separated origins allowed to call the API. |
+| `GRAPHQL_PLAYGROUND` | `false` | Serves the Apollo Explorer **and** enables introspection. |
+
+Values are validated with Joi at startup, so a malformed one (`PORT=abc`) fails the boot with a
+clear message rather than silently becoming `NaN`.
 
 ## Using the API
 
@@ -122,7 +226,7 @@ Queue a scan:
 
 ```graphql
 mutation {
-  startScan(input: { repositoryUrl: "https://github.com/OWASP/NodeGoat" }) {
+  startScan(input: { repositoryUrl: "https://github.com/nodeleaks/NodeGoat" }) {
     id
     status
   }
@@ -160,6 +264,29 @@ Per the assignment's setup step, target repository should be your own fork of
 fork's URL as `repositoryUrl` (this is a manual one-time step on your GitHub account, not
 something this service does for you).
 
+## Web UI (`web/`)
+
+A small React (Vite + TypeScript) frontend lives in `web/` and drives the API above: enter a
+repository URL, click **Start**, and it polls `scan(id)` every 2 seconds until the scan reaches
+`FINISHED` (or `FAILED`), then renders the CRITICAL vulnerability table. It's a separate app/process
+from the API - `docker-compose.yml` does not start it, so it's always run on its own, whether the
+API is running via Docker Compose or `npm run start:dev`.
+
+Prerequisites: Node.js 24+ and the API already running and reachable (see
+[Running it](#running-it) above).
+
+```bash
+cd web
+npm install
+cp .env.example .env   # default VITE_API_URL matches Option 1/2's default port
+npm run dev
+```
+
+Open `http://localhost:5173`. The default `VITE_API_URL` (`http://localhost:3000/graphql`) and the
+API's default `CORS_ORIGIN` (`http://localhost:5173`, see `.env.example` at the repo root) already
+match each other, so no config changes are needed for local dev with default ports - only override
+either if you've moved the API or the frontend off their default ports.
+
 ## The OOM self-test
 
 To prove the streaming pipeline holds up against a huge report under a constrained heap:
@@ -186,6 +313,24 @@ real repo to scan rather than a synthetic fixture):
 ```bash
 npm run start:oom-check   # node --max-old-space-size=150 dist/main.js
 ```
+
+### Containerized version
+
+`docker compose up --build` already runs the whole service under `mem_limit: 200m` /
+`memswap_limit: 200m` with `NODE_OPTIONS=--max-old-space-size=150` baked into `docker-compose.yml`
+- so submitting a real scan (`startScan` mutation against a real repo URL) through the running
+container **is** a self-test: clone, `trivy fs`, and the stream parser all have to fit
+in that 200MB boundary together, not just the parser in isolation. Watch it stay up rather than
+get OOM-killed:
+
+```bash
+docker compose up --build
+docker stats code-guardian-app-1   # watch memory while a scan runs
+```
+
+> Note: the Dockerfile/compose config were written and validated (`docker compose config`) in this
+> session, but not build -and-run end-to-end here - this sandbox doesn't have a Docker daemon
+> available. Worth doing that full run yourself before submitting.
 
 ## Error handling
 
@@ -240,11 +385,3 @@ temp path never prevents removing the other.
   the scan record's `FAILED` status; a BullMQ-level retry would re-run clone+scan+cleanup against
   a job that already reported failure, which isn't obviously more useful for this use case than
   letting the caller decide whether to submit a new scan.
-
-## Project status / bonuses
-
-- [x] Core: async `POST`-equivalent scan mutation, background worker, status query
-- [x] Bonus B: GraphQL API (this is the API - no separate REST layer)
-- [ ] Bonus A: React polling frontend - not yet built
-- [ ] Bonus C: `docker-compose.yml` with `mem_limit` for the app service - `docker-compose.yml`
-      currently only provides Redis for local dev; the app service + memory limit is a follow-up

@@ -17,9 +17,11 @@ import { ScanEngineError } from '../../common/errors/scan-engine.error';
 export class TrivyRunnerService {
   private readonly logger = new Logger(TrivyRunnerService.name);
   private readonly binaryPath: string;
+  private readonly timeoutMs: number;
 
   constructor(config: ConfigService<AppConfig, true>) {
     this.binaryPath = config.get('trivy.binaryPath', { infer: true });
+    this.timeoutMs = config.get('scan.timeoutMs', { infer: true });
   }
 
   async runFilesystemScan(repoDir: string, outputFilePath: string): Promise<void> {
@@ -38,7 +40,12 @@ export class TrivyRunnerService {
     this.logger.log(`Running: ${this.binaryPath} ${args.join(' ')}`);
 
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(this.binaryPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      // Without a timeout a hung trivy holds the worker forever - BullMQ
+      // runs one job at a time here, so that stalls every queued scan.
+      const child = spawn(this.binaryPath, args, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
 
       let stderrTail = '';
       child.stderr.on('data', (chunk: Buffer) => {
@@ -46,8 +53,20 @@ export class TrivyRunnerService {
       });
 
       child.on('error', (err) => {
-        // ENOENT here almost always means the `trivy` binary isn't
+        // Two distinct cases arrive here: the AbortSignal firing (name
+        // 'AbortError' / 'TimeoutError'), and a genuine spawn failure -
+        // where ENOENT almost always means the `trivy` binary isn't
         // installed / not on PATH.
+        if (err.name === 'AbortError' || err.name === 'TimeoutError') {
+          reject(
+            new ScanEngineError(
+              `trivy scan exceeded the ${this.timeoutMs}ms timeout and was aborted`,
+              'TIMED_OUT',
+              err,
+            ),
+          );
+          return;
+        }
         reject(
           new ScanEngineError(
             `Failed to start trivy (is it installed and on PATH? binary="${this.binaryPath}"): ${err.message}`,

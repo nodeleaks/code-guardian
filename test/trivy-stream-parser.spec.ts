@@ -87,6 +87,33 @@ describe('TrivyStreamParserService', () => {
     );
   });
 
+  it('ignores a non-array Vulnerabilities value instead of crashing', async () => {
+    // A `?.length` truthiness guard passes for an object carrying a `length`
+    // property and then throws on `for...of`. That throw happens inside the
+    // stream's 'data' listener, escaping the promise's reject and surfacing
+    // as an uncaught exception rather than a PARSE_FAILED.
+    const file = writeFixture(
+      'non-array-vulns.json',
+      JSON.stringify({
+        Results: [
+          { Target: 'bad', Vulnerabilities: { length: 3 } },
+          {
+            Target: 'good',
+            Vulnerabilities: [
+              { VulnerabilityID: 'CVE-1', PkgName: 'p', Severity: 'CRITICAL' },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const result = await service.extractCriticalVulnerabilities(file);
+
+    expect(result.totalCount).toBe(1);
+    expect(result.vulnerabilities).toHaveLength(1);
+    expect(result.vulnerabilities[0].target).toBe('good');
+  });
+
   it('rejects with a ScanEngineError when the file is not valid JSON', async () => {
     const filePath = writeFixture('broken.json', '{ this is not json');
 
