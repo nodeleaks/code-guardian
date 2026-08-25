@@ -23,20 +23,67 @@ export interface Scan {
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/graphql';
 
+// Mirrors StartScanInput's server-side validation
+// (src/scan/dto/start-scan.input.ts) so obviously-bad input gets an
+// immediate, specific message instead of a round trip to the API. The
+// server remains the source of truth - this is just a fast-path UX check.
+const GITHUB_REPO_URL_REGEX = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+(?:\.git)?\/?$/;
+
+export function isValidRepositoryUrl(url: string): boolean {
+  return GITHUB_REPO_URL_REGEX.test(url);
+}
+
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+interface GraphQLError {
+  message: string;
+  extensions?: {
+    originalError?: { message?: string | string[] };
+  };
+}
+
+// NestJS's ValidationPipe (used for StartScanInput) reports the actual
+// class-validator message(s) under extensions.originalError.message, not
+// in the top-level `message` field - GraphQL wraps that as the generic
+// "Bad Request Exception". Prefer the specific one so a user who somehow
+// gets past the client-side URL check (isValidRepositoryUrl) still sees
+// why the server rejected it, not just "Bad Request Exception".
+function describeGraphQLError(err: GraphQLError): string {
+  const original = err.extensions?.originalError?.message;
+  if (Array.isArray(original) && original.length > 0) return original.join('; ');
+  if (typeof original === 'string') return original;
+  return err.message;
+}
+
 async function graphqlRequest<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, variables }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch {
+    // fetch() only throws on network-level failures (server down, DNS,
+    // CORS preflight rejection, offline) - HTTP error statuses land below.
+    throw new Error(`Could not reach the API at ${API_URL}. Is the server running?`);
+  }
 
   if (!res.ok) {
     throw new Error(`GraphQL request failed: HTTP ${res.status}`);
   }
 
-  const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
+  let body: { data?: T; errors?: GraphQLError[] };
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error('The API returned a response that was not valid JSON.');
+  }
+
   if (body.errors?.length) {
-    throw new Error(body.errors.map((e) => e.message).join('; '));
+    throw new Error(body.errors.map(describeGraphQLError).join('; '));
   }
   if (!body.data) {
     throw new Error('GraphQL response had no data');

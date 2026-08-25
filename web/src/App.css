@@ -95,3 +95,20 @@ td {
   border-bottom: 1px solid #eee;
   font-size: 0.9rem;
 }
+
+.error {
+  color: #c0392b;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.retry-button {
+  padding: 0.2rem 0.7rem;
+  font-size: 0.85rem;
+  border: 1px solid #c0392b;
+  border-radius: 6px;
+  background: white;
+  color: #c0392b;
+  cursor: pointer;
+}
