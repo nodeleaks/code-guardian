@@ -19,6 +19,7 @@ on a **BullMQ**/Redis-backed queue.
     - [Option 1: Docker Compose (recommended - no local Trivy install needed)](#option-1-docker-compose-recommended---no-local-trivy-install-needed)
       - [Why there's a separate `trivy-db` service](#why-theres-a-separate-trivy-db-service)
     - [Option 2: Local Node + local Trivy](#option-2-local-node--local-trivy)
+  - [Configuration](#configuration)
   - [Using the API](#using-the-api)
   - [Web UI (`web/`)](#web-ui-web)
   - [The OOM self-test](#the-oom-self-test)
@@ -188,7 +189,36 @@ npm run start:dev     # watch mode
 npm run start:prod    # runs dist/main.js
 ```
 
-The GraphQL endpoint (with the interactive Explorer) is at `http://localhost:3000/graphql`.
+The GraphQL endpoint is at `http://localhost:3000/graphql`.
+
+The interactive Apollo Explorer (and the schema introspection it relies on) is gated behind
+`GRAPHQL_PLAYGROUND` and **defaults to off** - exposing a full schema dump on an
+unauthenticated endpoint isn't something that should depend on remembering to set `NODE_ENV`.
+The Docker Compose stack sets `GRAPHQL_PLAYGROUND=true` for you since it's a local demo; running
+locally via Option 2, set it yourself (`GRAPHQL_PLAYGROUND=true npm run start:dev`) if you want
+the Explorer.
+
+## Configuration
+
+Every setting has a working default - `cp .env.example .env` is enough for local dev. The full
+list lives in `.env.example`; the ones worth knowing about:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP port. |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Queue + status store. |
+| `REDIS_PASSWORD` | *(unset)* | Set for a Redis requiring AUTH. |
+| `REDIS_TLS` | `false` | `true` to connect over TLS (managed Redis usually needs this). |
+| `TRIVY_BINARY_PATH` | `trivy` | Path or command name of the Trivy binary. |
+| `SCAN_RECORD_TTL_SECONDS` | `86400` | How long a finished/failed scan is kept in Redis. |
+| `SCAN_TIMEOUT_MS` | `300000` | Wall-clock cap applied separately to `git clone` and `trivy fs`. |
+| `SCAN_MAX_REPO_SIZE_MB` | `1024` | Reject a cloned tree larger than this before scanning. |
+| `SCAN_MAX_QUEUE_DEPTH` | `100` | Refuse new scans once this many jobs are waiting. |
+| `CORS_ORIGIN` | `http://localhost:5173` | Comma-separated origins allowed to call the API. |
+| `GRAPHQL_PLAYGROUND` | `false` | Serves the Apollo Explorer **and** enables introspection. |
+
+Values are validated with Joi at startup, so a malformed one (`PORT=abc`) fails the boot with a
+clear message rather than silently becoming `NaN`.
 
 ## Using the API
 

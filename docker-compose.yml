@@ -69,6 +69,11 @@ services:
       # straight through the 200m limit below.
       TRIVY_CACHE_DIR: /trivy-cache
       TRIVY_SKIP_DB_UPDATE: 'true'
+      # This is an explicitly local/demo stack, so the Apollo explorer (and
+      # the introspection it needs) is turned on here. It defaults to OFF in
+      # code - relying on NODE_ENV alone previously left it exposed on any
+      # run path that didn't happen to set it.
+      GRAPHQL_PLAYGROUND: 'true'
       # Mirrors the assignment's `node --max-old-space-size=150` self-test:
       # cap the V8 heap explicitly rather than relying on V8's own
       # (not always conservative) auto-detection of the cgroup limit, and
