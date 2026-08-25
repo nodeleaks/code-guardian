@@ -21,7 +21,7 @@ describe('ScanRepository', () => {
 
     repository = new ScanRepository(
       fakeRedis as unknown as Redis,
-      fakeConfigService as unknown as ConfigService<any, true>,
+      fakeConfigService as unknown as ConfigService<never, true>,
     );
   });
 
@@ -63,7 +63,7 @@ describe('ScanRepository', () => {
     });
 
     it('returns null when redis.get returns null', async () => {
-      fakeRedis.get.mockResolvedValue(null as any);
+      fakeRedis.get.mockResolvedValue(null);
 
       const result = await repository.findById('nonexistent');
 
