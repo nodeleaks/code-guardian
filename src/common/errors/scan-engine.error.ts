@@ -4,6 +4,8 @@ export type ScanEngineErrorCode =
   | 'TRIVY_EXEC_FAILED'
   | 'PARSE_FAILED'
   | 'DISK_FULL'
+  | 'TIMED_OUT'
+  | 'REPO_TOO_LARGE'
   | 'UNKNOWN';
 
 /**

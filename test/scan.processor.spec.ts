@@ -128,9 +128,11 @@ describe('ScanProcessor', () => {
 
       await processor.process(fakeJob as Job<ScanJobData>);
 
+      // Sanitized, not `[CLONE_FAILED] Repository not found` - the raw
+      // message (subprocess stderr, temp paths) goes to the log only.
       expect(fakeRepository.markFailed).toHaveBeenCalledWith(
         'test-scan-123',
-        expect.stringContaining('[CLONE_FAILED]'),
+        'Could not clone the repository. Check that the URL is correct and the repository is public.',
       );
       expect(fakeTrivyRunner.runFilesystemScan).not.toHaveBeenCalled();
     });
@@ -146,7 +148,7 @@ describe('ScanProcessor', () => {
 
       expect(fakeRepository.markFailed).toHaveBeenCalledWith(
         'test-scan-123',
-        expect.stringContaining('[TRIVY_EXEC_FAILED]'),
+        'The scanner failed while analysing the repository.',
       );
       expect(fakeStreamParser.extractCriticalVulnerabilities).not.toHaveBeenCalled();
 
@@ -165,7 +167,7 @@ describe('ScanProcessor', () => {
 
       expect(fakeRepository.markFailed).toHaveBeenCalledWith(
         'test-scan-123',
-        expect.stringContaining('[PARSE_FAILED]'),
+        'The scan produced a report that could not be read.',
       );
 
       rmSync(repoDir, { recursive: true, force: true });
@@ -178,7 +180,7 @@ describe('ScanProcessor', () => {
 
       expect(fakeRepository.markFailed).toHaveBeenCalledWith(
         'test-scan-123',
-        expect.stringContaining('Unexpected error: Unexpected error'),
+        'The scan failed for an unexpected reason.',
       );
     });
 
@@ -189,7 +191,7 @@ describe('ScanProcessor', () => {
 
       expect(fakeRepository.markFailed).toHaveBeenCalledWith(
         'test-scan-123',
-        expect.stringContaining('Unexpected error: string error'),
+        'The scan failed for an unexpected reason.',
       );
     });
 
@@ -238,9 +240,12 @@ describe('ScanProcessor', () => {
       writeFileSync(reportFile, '{}');
 
       (fakeGitCloner.cloneToTemp as jest.Mock).mockResolvedValue(repoDir);
-      (fakeTrivyRunner.runFilesystemScan as jest.Mock).mockImplementation(async (_, path) => {
-        writeFileSync(path, '[]');
-      });
+      (fakeTrivyRunner.runFilesystemScan as jest.Mock).mockImplementation(
+        (_repoDir: string, path: string) => {
+          writeFileSync(path, '[]');
+          return Promise.resolve();
+        },
+      );
       (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockResolvedValue({
         vulnerabilities: [],
         totalCount: 0,

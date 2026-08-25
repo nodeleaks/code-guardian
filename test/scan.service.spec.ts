@@ -1,3 +1,4 @@
+import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { ScanService } from '../src/scan/scan.service';
 import { ScanRepository } from '../src/scan/scan.repository';
@@ -15,12 +16,14 @@ describe('ScanService', () => {
     };
 
     fakeQueue = {
-      add: jest.fn().mockResolvedValue({ id: 'job-id' } as any),
+      add: jest.fn().mockResolvedValue({ id: 'job-id' }),
+      getWaitingCount: jest.fn().mockResolvedValue(0),
     };
 
     service = new ScanService(
       fakeRepository as unknown as ScanRepository,
       fakeQueue as unknown as Queue<ScanJobData>,
+      { get: jest.fn().mockReturnValue(100) } as unknown as ConfigService<never, true>,
     );
   });
 
@@ -80,6 +83,28 @@ describe('ScanService', () => {
       expect(result.id).toBeDefined();
       expect(result.repositoryUrl).toBe('https://github.com/nodeleaks/code-guardian');
       expect(result.status).toBe(ScanStatus.QUEUED);
+    });
+  });
+
+  describe('queue depth bound', () => {
+    it('rejects and creates no record once the queue is at capacity', async () => {
+      (fakeQueue.getWaitingCount as jest.Mock).mockResolvedValue(100);
+
+      await expect(service.startScan('https://github.com/owner/repo')).rejects.toMatchObject({
+        status: 503,
+      });
+
+      // Checked before the record is written, so a rejected request leaves
+      // nothing behind in Redis and nothing on the queue.
+      expect(fakeRepository.create).not.toHaveBeenCalled();
+      expect(fakeQueue.add).not.toHaveBeenCalled();
+    });
+
+    it('accepts while below capacity', async () => {
+      (fakeQueue.getWaitingCount as jest.Mock).mockResolvedValue(99);
+
+      await expect(service.startScan('https://github.com/owner/repo')).resolves.toBeDefined();
+      expect(fakeQueue.add).toHaveBeenCalled();
     });
   });
 

@@ -64,6 +64,18 @@ describe('StartScanInput', () => {
       expect(await validateInput('owner/repo')).toBeGreaterThan(0);
     });
 
+    it('rejects .. as a path segment', async () => {
+      expect(await validateInput('https://github.com/../..')).toBeGreaterThan(0);
+    });
+
+    it('rejects . as a path segment', async () => {
+      expect(await validateInput('https://github.com/./.')).toBeGreaterThan(0);
+    });
+
+    it('rejects .. as the repo segment only', async () => {
+      expect(await validateInput('https://github.com/owner/..')).toBeGreaterThan(0);
+    });
+
     it('rejects missing .com', async () => {
       expect(await validateInput('https://github/owner/repo')).toBeGreaterThan(0);
     });
