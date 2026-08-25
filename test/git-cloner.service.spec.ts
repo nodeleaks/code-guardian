@@ -2,7 +2,6 @@ import { readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GitClonerService } from '../src/scan/trivy/git-cloner.service';
-import { ScanEngineError } from '../src/common/errors/scan-engine.error';
 
 jest.mock('simple-git');
 

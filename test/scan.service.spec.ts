@@ -1,7 +1,7 @@
 import { Queue } from 'bullmq';
 import { ScanService } from '../src/scan/scan.service';
 import { ScanRepository } from '../src/scan/scan.repository';
-import { ScanStatus, type ScanJobData, SCAN_QUEUE_NAME } from '../src/scan/interfaces/scan-record.interface';
+import { ScanStatus, type ScanJobData } from '../src/scan/interfaces/scan-record.interface';
 
 describe('ScanService', () => {
   let fakeRepository: jest.Mocked<Partial<ScanRepository>>;

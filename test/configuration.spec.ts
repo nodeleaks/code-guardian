@@ -1,5 +1,4 @@
 import configuration from '../src/config/configuration';
-import type { AppConfig } from '../src/config/configuration';
 
 describe('Configuration', () => {
   let originalEnv: NodeJS.ProcessEnv;

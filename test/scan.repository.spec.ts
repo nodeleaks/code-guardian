@@ -1,7 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import type Redis from 'ioredis';
 import { ScanRepository } from '../src/scan/scan.repository';
-import { REDIS_CLIENT } from '../src/redis/redis.constants';
 import { ScanStatus, type ScanRecord, type CriticalVulnerability } from '../src/scan/interfaces/scan-record.interface';
 
 describe('ScanRepository', () => {
