@@ -4,6 +4,9 @@
   "description": "Code Guardian - memory-safe backend service wrapping Trivy security scanner (NestJS + GraphQL + BullMQ)",
   "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",

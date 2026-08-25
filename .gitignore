@@ -7,3 +7,4 @@ coverage
 tmp/
 fixtures/*.json
 schema.gql
+*.tsbuildinfo
