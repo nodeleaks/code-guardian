@@ -10,6 +10,9 @@ export interface AppConfig {
   scan: {
     recordTtlSeconds: number;
   };
+  cors: {
+    origin: string[];
+  };
 }
 
 export default (): AppConfig => ({
@@ -23,5 +26,14 @@ export default (): AppConfig => ({
   },
   scan: {
     recordTtlSeconds: parseInt(process.env.SCAN_RECORD_TTL_SECONDS ?? '86400', 10),
+  },
+  cors: {
+    // Comma-separated list of allowed origins for the React frontend (see
+    // web/). Defaults to Vite's default dev port so `npm run dev` in web/
+    // works against a locally-run API with zero config.
+    origin: (process.env.CORS_ORIGIN ?? 'http://localhost:5173')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean),
   },
 });

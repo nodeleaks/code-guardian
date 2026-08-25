@@ -18,6 +18,8 @@ async function bootstrap(): Promise<void> {
   const config = app.get(ConfigService<AppConfig, true>);
   const port = config.get('port', { infer: true });
 
+  app.enableCors({ origin: config.get('cors.origin', { infer: true }) });
+
   await app.listen(port);
   console.log(`Code Guardian listening on http://localhost:${port}/graphql`);
 }
