@@ -5,7 +5,7 @@ GitHub repository for vulnerabilities, designed to survive a 500MB+ scan report 
 memory-constrained pod (e.g. a 256MB Kubernetes container) without ever loading that report into
 memory as a whole.
 
-Built with **NestJS**, exposing a **GraphQL** API (Bonus B), with scans processed asynchronously
+Built with **NestJS**, exposing a **GraphQL** API, with scans processed asynchronously
 on a **BullMQ**/Redis-backed queue.
 
 ## Table of contents
@@ -20,11 +20,11 @@ on a **BullMQ**/Redis-backed queue.
       - [Why there's a separate `trivy-db` service](#why-theres-a-separate-trivy-db-service)
     - [Option 2: Local Node + local Trivy](#option-2-local-node--local-trivy)
   - [Using the API](#using-the-api)
+  - [Web UI (`web/`)](#web-ui-web)
   - [The OOM self-test](#the-oom-self-test)
-    - [Containerized version (Bonus C)](#containerized-version-bonus-c)
+    - [Containerized version](#containerized-version)
   - [Error handling](#error-handling)
   - [Trade-offs and design notes](#trade-offs-and-design-notes)
-  - [Project status / bonuses](#project-status--bonuses)
 
 ## Architecture
 
@@ -105,7 +105,7 @@ service (Docker-outside-of-Docker, needing `/var/run/docker.sock` mounted in). T
 
 1. Mounting the Docker socket into a container is effectively root access to the host - real K8s
    clusters almost universally block it, so it wouldn't reflect how this would actually deploy.
-2. It would undermine the exact thing Bonus C is supposed to prove. If Trivy runs in a sibling
+2. If Trivy runs in a sibling
    container with no memory limit of its own, the `mem_limit: 200m` on the *app* container is only
    constraining a process that isn't doing the heavy lifting - `trivy fs` writing the huge report
    and this process reading it back both need to happen **inside** the constrained boundary for
@@ -132,7 +132,7 @@ why it's packaged this way rather than shelling out to `docker run`), and runs i
 docker compose up --build
 ```
 
-The `app` service also carries Bonus C's constraint - `mem_limit: 200m` / `memswap_limit: 200m` -
+The `app` service also carries memory's constraint - `mem_limit: 200m` / `memswap_limit: 200m` -
 plus `NODE_OPTIONS=--max-old-space-size=150`, mirroring the assignment's own OOM self-test but
 applied to the whole container, not just a local `node` invocation. The GraphQL endpoint is at
 `http://localhost:3000/graphql`.
@@ -234,6 +234,29 @@ Per the assignment's setup step, target repository should be your own fork of
 fork's URL as `repositoryUrl` (this is a manual one-time step on your GitHub account, not
 something this service does for you).
 
+## Web UI (`web/`)
+
+A small React (Vite + TypeScript) frontend lives in `web/` and drives the API above: enter a
+repository URL, click **Start**, and it polls `scan(id)` every 2 seconds until the scan reaches
+`FINISHED` (or `FAILED`), then renders the CRITICAL vulnerability table. It's a separate app/process
+from the API - `docker-compose.yml` does not start it, so it's always run on its own, whether the
+API is running via Docker Compose or `npm run start:dev`.
+
+Prerequisites: Node.js 24+ and the API already running and reachable (see
+[Running it](#running-it) above).
+
+```bash
+cd web
+npm install
+cp .env.example .env   # default VITE_API_URL matches Option 1/2's default port
+npm run dev
+```
+
+Open `http://localhost:5173`. The default `VITE_API_URL` (`http://localhost:3000/graphql`) and the
+API's default `CORS_ORIGIN` (`http://localhost:5173`, see `.env.example` at the repo root) already
+match each other, so no config changes are needed for local dev with default ports - only override
+either if you've moved the API or the frontend off their default ports.
+
 ## The OOM self-test
 
 To prove the streaming pipeline holds up against a huge report under a constrained heap:
@@ -261,12 +284,12 @@ real repo to scan rather than a synthetic fixture):
 npm run start:oom-check   # node --max-old-space-size=150 dist/main.js
 ```
 
-### Containerized version (Bonus C)
+### Containerized version
 
 `docker compose up --build` already runs the whole service under `mem_limit: 200m` /
 `memswap_limit: 200m` with `NODE_OPTIONS=--max-old-space-size=150` baked into `docker-compose.yml`
 - so submitting a real scan (`startScan` mutation against a real repo URL) through the running
-container **is** the Bonus C self-test: clone, `trivy fs`, and the stream parser all have to fit
+container **is** a self-test: clone, `trivy fs`, and the stream parser all have to fit
 in that 200MB boundary together, not just the parser in isolation. Watch it stay up rather than
 get OOM-killed:
 
@@ -332,14 +355,3 @@ temp path never prevents removing the other.
   the scan record's `FAILED` status; a BullMQ-level retry would re-run clone+scan+cleanup against
   a job that already reported failure, which isn't obviously more useful for this use case than
   letting the caller decide whether to submit a new scan.
-
-## Project status / bonuses
-
-- [x] Core: async `POST`-equivalent scan mutation, background worker, status query
-- [x] Bonus B: GraphQL API (this is the API - no separate REST layer)
-- [ ] Bonus A: React polling frontend - not yet built
-- [x] Bonus C: `Dockerfile` (Node + git + trivy in one image) and `docker-compose.yml`'s `app`
-      service with `mem_limit: 200m` / `memswap_limit: 200m`. Config validated with
-      `docker compose config`; a full `docker compose up --build` + real-scan run wasn't done in
-      this session (no Docker daemon available here) - see the note in
-      [The OOM self-test](#the-oom-self-test).

@@ -5,7 +5,7 @@
 # cache volume before anything else runs.
 # `app` is the service itself, built from the Dockerfile (Node + git + trivy
 # baked into one image - see Dockerfile comments for why). Its `mem_limit:
-# 200m` is Bonus C: proof the streaming pipeline holds up under the same
+# 200m` is: proof the streaming pipeline holds up under the same
 # kind of constraint the assignment describes (a small K8s pod), not just
 # via `--max-old-space-size` on a developer machine.
 services:
