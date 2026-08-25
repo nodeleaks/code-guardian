@@ -41,6 +41,17 @@ RUN apt-get update \
 ENV NODE_ENV=production
 ENV TRIVY_BINARY_PATH=trivy
 
+# Trivy's vulnerability DB is a ~1.3GB bolt file, and *downloading* it is by
+# far the most memory-hungry thing this image does: extracting the tarball to
+# disk pushed the cgroup to ~1GB in testing (mostly dirty page cache), while
+# the scan itself peaks around 47MB. So the cache lives on its own mount
+# point, populated once by the `trivy-db` init service in docker-compose.yml
+# and shared with the app read-write - the app itself runs with
+# TRIVY_SKIP_DB_UPDATE=true and never pays the download cost. That's what
+# makes the 200m limit on `app` an honest test of the streaming pipeline
+# rather than a coin flip against the DB downloader.
+ENV TRIVY_CACHE_DIR=/trivy-cache
+
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
@@ -52,8 +63,13 @@ COPY package.json ./
 # Without this, anything the app tries to write under its own working
 # directory (e.g. GraphQLModule's autoSchemaFile in non-production configs)
 # fails with EACCES.
+# /trivy-cache must exist in the image *and* be owned by appuser: Docker
+# seeds a fresh named volume from the image's content at that path, ownership
+# included. Without this the volume comes up root-owned and trivy dies with
+# `mkdir /trivy-cache/db: permission denied`.
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p /trivy-cache \
+    && chown -R appuser:appuser /app /trivy-cache
 USER appuser
 
 EXPOSE 3000

@@ -17,6 +17,7 @@ on a **BullMQ**/Redis-backed queue.
   - [Trivy delivery: Docker vs. local binary](#trivy-delivery-docker-vs-local-binary)
   - [Running it](#running-it)
     - [Option 1: Docker Compose (recommended - no local Trivy install needed)](#option-1-docker-compose-recommended---no-local-trivy-install-needed)
+      - [Why there's a separate `trivy-db` service](#why-theres-a-separate-trivy-db-service)
     - [Option 2: Local Node + local Trivy](#option-2-local-node--local-trivy)
   - [Using the API](#using-the-api)
   - [The OOM self-test](#the-oom-self-test)
@@ -110,6 +111,12 @@ service (Docker-outside-of-Docker, needing `/var/run/docker.sock` mounted in). T
    and this process reading it back both need to happen **inside** the constrained boundary for
    the OOM test to mean anything.
 
+The `trivy-db` init container isn't an exception to that. It only *downloads* the vulnerability DB
+into a shared volume and exits; it never scans. Every part of the work the OOM test is about - the
+clone, `trivy fs`, and the streaming parse - still happens inside the 200m boundary. See
+[Why there's a separate `trivy-db` service](#why-theres-a-separate-trivy-db-service) for the
+measurements that forced the split.
+
 ## Running it
 
 There are two ways to run this, and the difference is really just "where does the `trivy`
@@ -129,6 +136,31 @@ The `app` service also carries Bonus C's constraint - `mem_limit: 200m` / `memsw
 plus `NODE_OPTIONS=--max-old-space-size=150`, mirroring the assignment's own OOM self-test but
 applied to the whole container, not just a local `node` invocation. The GraphQL endpoint is at
 `http://localhost:3000/graphql`.
+
+#### Why there's a separate `trivy-db` service
+
+The stack starts a short-lived `trivy-db` container before `app`, using the same image, purely to
+run `trivy fs --download-db-only` into a shared `trivy-cache` volume. `app` then scans with
+`TRIVY_SKIP_DB_UPDATE=true` and never downloads anything itself.
+
+That split exists because *downloading* Trivy's vulnerability DB and *scanning with* it have wildly
+different memory profiles. Measured on this image:
+
+| Phase | Peak container memory |
+| --- | --- |
+| `trivy fs` with a warm cache and `--skip-db-update` | **~47 MB** (succeeds even at `-m 128m`) |
+| `trivy fs` with a cold cache (downloads the DB) | **OOM-killed at 200m and at 512m**; needs ~1 GB |
+
+The DB is a ~1.3 GB bolt file, and extracting it fills the cgroup with dirty page cache faster than
+the kernel can write it back - with `memswap_limit == mem_limit` there's no swap to fall back on, so
+the cgroup OOM killer fires and takes PID 1 (Node) with it. The container dies with **exit code
+137** before the scan even starts.
+
+So the download gets its own container with room to breathe, and the 200m limit on `app` measures
+what it's actually meant to measure: the clone, the scan, and the streaming parse. Because the cache
+lives in a named volume, the 1.3 GB download survives `docker compose down` and happens once, not on
+every cold start. Re-running `docker compose up` re-runs `trivy-db`, which is a no-op while the
+cached DB is still fresh.
 
 To pin a specific Trivy version for reproducible builds instead of "whatever's latest at build
 time," uncomment the `args: TRIVY_VERSION:` line in `docker-compose.yml`.
@@ -164,7 +196,7 @@ Queue a scan:
 
 ```graphql
 mutation {
-  startScan(input: { repositoryUrl: "https://github.com/OWASP/NodeGoat" }) {
+  startScan(input: { repositoryUrl: "https://github.com/nodeleaks/NodeGoat" }) {
     id
     status
   }
