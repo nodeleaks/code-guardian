@@ -114,6 +114,36 @@ describe('TrivyStreamParserService', () => {
     expect(result.vulnerabilities[0].target).toBe('good');
   });
 
+  it('rejects a well-formed JSON file that has no Results key', async () => {
+    // The dangerous shape: trivy exits 0 and writes valid JSON that isn't a
+    // filesystem-scan report. `pick` yields nothing, so without an explicit
+    // check this resolves as "0 CRITICAL" and the scan is marked FINISHED -
+    // a clean bill of health for a repository nobody actually scanned.
+    const filePath = writeFixture(
+      'no-results-key.json',
+      JSON.stringify({ SchemaVersion: 2, ArtifactName: 'nodegoat' }),
+    );
+
+    await expect(service.extractCriticalVulnerabilities(filePath)).rejects.toMatchObject({
+      name: 'ScanEngineError',
+      code: 'PARSE_FAILED',
+    });
+  });
+
+  it('accepts an empty Results array as a genuinely clean scan', async () => {
+    // The boundary the check above must not cross. After streamArray() this
+    // is indistinguishable from a missing Results key - both yield zero
+    // elements - so anything based on counting emitted targets would reject
+    // a legitimately clean repository. Only the token stream separates them.
+    const filePath = writeFixture('empty-results.json', JSON.stringify({ Results: [] }));
+
+    const result = await service.extractCriticalVulnerabilities(filePath);
+
+    expect(result.totalCount).toBe(0);
+    expect(result.truncated).toBe(false);
+    expect(result.vulnerabilities).toEqual([]);
+  });
+
   it('rejects with a ScanEngineError when the file is not valid JSON', async () => {
     const filePath = writeFixture('broken.json', '{ this is not json');
 

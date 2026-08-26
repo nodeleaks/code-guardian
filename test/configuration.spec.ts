@@ -1,4 +1,8 @@
 import configuration from '../src/config/configuration';
+import {
+  envValidationOptions,
+  envValidationSchema,
+} from '../src/config/env-validation.schema';
 
 describe('Configuration', () => {
   let originalEnv: NodeJS.ProcessEnv;
@@ -128,6 +132,60 @@ describe('Configuration', () => {
       process.env.CORS_ORIGIN = ',http://a.com';
       const config = configuration();
       expect(config.cors.origin).toEqual(['http://a.com']);
+    });
+  });
+
+  // @nestjs/config only writes Joi's coerced values back into process.env for
+  // variables that weren't already set, so for anything an operator actually
+  // sets, the schema and configuration() parse the same string independently.
+  // These tests pin the two together: the schema rejects whatever the runtime
+  // would read differently, and the runtime reads whatever the schema accepts
+  // exactly as the schema saw it.
+  describe('agreement between the Joi schema and runtime parsing', () => {
+    it('reads exponential notation the same way the schema validated it', () => {
+      // parseInt('1e5', 10) is 1 - a 1ms clone timeout from a value Joi
+      // accepted as 100000.
+      process.env.SCAN_TIMEOUT_MS = '1e5';
+
+      expect(envValidationSchema.validate({ SCAN_TIMEOUT_MS: '1e5' }, envValidationOptions).error)
+        .toBeUndefined();
+      expect(configuration().scan.timeoutMs).toBe(100000);
+    });
+
+    it.each([
+      ['SCAN_RECORD_TTL_SECONDS', '0.5'],
+      ['SCAN_TIMEOUT_MS', '0.5'],
+      ['SCAN_MAX_REPO_SIZE_MB', '0.5'],
+      ['SCAN_MAX_QUEUE_DEPTH', '0.5'],
+    ])('rejects a fractional %s at boot', (name, value) => {
+      // Fractional values truncate to 0 at runtime: `SET ... EX 0` fails every
+      // scan, a queue depth of 0 rejects every mutation, a size limit of 0
+      // rejects every clone. `.positive()` alone lets all of these through.
+      const { error } = envValidationSchema.validate({ [name]: value }, envValidationOptions);
+      expect(error).toBeDefined();
+    });
+
+    it.each([
+      ['SCAN_RECORD_TTL_SECONDS', '31536001'],
+      ['SCAN_TIMEOUT_MS', '3600001'],
+      ['SCAN_MAX_REPO_SIZE_MB', '51201'],
+      ['SCAN_MAX_QUEUE_DEPTH', '100001'],
+    ])('rejects an out-of-range %s at boot', (name, value) => {
+      const { error } = envValidationSchema.validate({ [name]: value }, envValidationOptions);
+      expect(error).toBeDefined();
+    });
+
+    it('still accepts the documented defaults', () => {
+      const { error } = envValidationSchema.validate(
+        {
+          SCAN_RECORD_TTL_SECONDS: '86400',
+          SCAN_TIMEOUT_MS: '300000',
+          SCAN_MAX_REPO_SIZE_MB: '1024',
+          SCAN_MAX_QUEUE_DEPTH: '100',
+        },
+        envValidationOptions,
+      );
+      expect(error).toBeUndefined();
     });
   });
 
