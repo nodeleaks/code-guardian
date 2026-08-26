@@ -27,11 +27,22 @@ export interface AppConfig {
   };
 }
 
+// Number(), not parseInt(): this file re-reads process.env independently of
+// the Joi schema in app.module.ts, and @nestjs/config only writes Joi's
+// coerced values back for variables that weren't already set - so for any
+// variable an operator actually set, these two parsers have to agree.
+// parseInt doesn't: it reads "1e5" as 1 and "0.5" as 0, both of which Joi
+// happily accepts, which is how a validated config still produced a 1ms
+// timeout or `SET ... EX 0`. Number matches Joi's own coercion, and anything
+// it would read differently (e.g. "0x10") Joi rejects at boot first.
+const asNumber = (value: string | undefined, fallback: number): number =>
+  value === undefined ? fallback : Number(value);
+
 export default (): AppConfig => ({
-  port: parseInt(process.env.PORT ?? '3000', 10),
+  port: asNumber(process.env.PORT, 3000),
   redis: {
     host: process.env.REDIS_HOST ?? 'localhost',
-    port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
+    port: asNumber(process.env.REDIS_PORT, 6379),
     password: process.env.REDIS_PASSWORD || undefined,
     tls: process.env.REDIS_TLS === 'true',
   },
@@ -39,10 +50,10 @@ export default (): AppConfig => ({
     binaryPath: process.env.TRIVY_BINARY_PATH ?? 'trivy',
   },
   scan: {
-    recordTtlSeconds: parseInt(process.env.SCAN_RECORD_TTL_SECONDS ?? '86400', 10),
-    timeoutMs: parseInt(process.env.SCAN_TIMEOUT_MS ?? '300000', 10),
-    maxRepoSizeMb: parseInt(process.env.SCAN_MAX_REPO_SIZE_MB ?? '1024', 10),
-    maxQueueDepth: parseInt(process.env.SCAN_MAX_QUEUE_DEPTH ?? '100', 10),
+    recordTtlSeconds: asNumber(process.env.SCAN_RECORD_TTL_SECONDS, 86400),
+    timeoutMs: asNumber(process.env.SCAN_TIMEOUT_MS, 300000),
+    maxRepoSizeMb: asNumber(process.env.SCAN_MAX_REPO_SIZE_MB, 1024),
+    maxQueueDepth: asNumber(process.env.SCAN_MAX_QUEUE_DEPTH, 100),
   },
   cors: {
     // Comma-separated list of allowed origins for the React frontend (see

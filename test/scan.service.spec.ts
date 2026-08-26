@@ -108,6 +108,40 @@ describe('ScanService', () => {
     });
   });
 
+  // BullMQ configures its own connection with maxRetriesPerRequest: null and
+  // ioredis buffers commands while disconnected, so with Redis down these
+  // calls never reject on their own - the resolver would simply never return.
+  describe('unresponsive queue', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    async function expectServiceUnavailable(promise: Promise<unknown>): Promise<void> {
+      const assertion = expect(promise).rejects.toMatchObject({ status: 503 });
+      await jest.advanceTimersByTimeAsync(5000);
+      await assertion;
+    }
+
+    it('fails the request when reading the queue depth never settles', async () => {
+      (fakeQueue.getWaitingCount as jest.Mock).mockReturnValue(new Promise(() => {}));
+
+      await expectServiceUnavailable(service.startScan('https://github.com/owner/repo'));
+
+      expect(fakeRepository.create).not.toHaveBeenCalled();
+      expect(fakeQueue.add).not.toHaveBeenCalled();
+    });
+
+    it('fails the request when enqueuing never settles', async () => {
+      (fakeQueue.add as jest.Mock).mockReturnValue(new Promise(() => {}));
+
+      await expectServiceUnavailable(service.startScan('https://github.com/owner/repo'));
+    });
+  });
+
   describe('getScan', () => {
     it('delegates to repository.findById', async () => {
       (fakeRepository.findById as jest.Mock).mockResolvedValue(null);

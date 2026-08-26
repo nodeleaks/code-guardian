@@ -77,12 +77,24 @@ export class TrivyStreamParserService {
     let totalCount = 0;
     let targetsProcessed = 0;
 
-    const pipeline = chain([
-      createReadStream(filePath),
-      parser(),
-      pick({ filter: 'Results' }),
-      streamArray(),
-    ]);
+    const picked = pick({ filter: 'Results' });
+
+    const pipeline = chain([createReadStream(filePath), parser(), picked, streamArray()]);
+
+    // `pick` emits nothing at all when the report has no `Results` key, which
+    // after `streamArray()` is indistinguishable from `Results: []` - both
+    // produce zero elements. Only the token stream separates them: an empty
+    // array still emits startArray/endArray, a missing key emits nothing.
+    //
+    // Observed with a self-removing listener alongside the pipe rather than a
+    // passthrough Transform in the chain: a Transform sees every token in the
+    // Results subtree, which measurably doubled parse time on the 500MB+
+    // fixture. `once` costs one extra emit, then detaches. It only observes -
+    // the pipe still drives flow, so backpressure is unaffected.
+    let sawResultsKey = false;
+    picked.once('data', () => {
+      sawResultsKey = true;
+    });
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -117,6 +129,17 @@ export class TrivyStreamParserService {
         `Failed to stream-parse trivy report at "${filePath}": ${message}`,
         'PARSE_FAILED',
         err,
+      );
+    }
+
+    // Deliberately outside the try above: this isn't a stream failure to be
+    // wrapped, it's a well-formed JSON file that isn't a Trivy report. Left
+    // unchecked it would resolve as "0 CRITICAL, FINISHED" - a clean bill of
+    // health for a repository nobody actually scanned.
+    if (!sawResultsKey) {
+      throw new ScanEngineError(
+        `Trivy report at "${filePath}" has no "Results" key - not a trivy fs report`,
+        'PARSE_FAILED',
       );
     }
 
