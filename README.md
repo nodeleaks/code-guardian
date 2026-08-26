@@ -8,6 +8,9 @@ memory as a whole.
 Built with **NestJS**, exposing a **GraphQL** API, with scans processed asynchronously
 on a **BullMQ**/Redis-backed queue.
 
+A small [web UI](#web-ui-web) is also included for interacting with the API without writing
+GraphQL queries by hand.
+
 ## Table of contents
 
 - [Code Guardian](#code-guardian)
