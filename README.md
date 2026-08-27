@@ -11,9 +11,45 @@ on a **BullMQ**/Redis-backed queue.
 A small [web UI](#web-ui-web) is also included for interacting with the API without writing
 GraphQL queries by hand.
 
+## Quick start
+
+From nothing to a working UI. You need [Docker](https://docs.docker.com/get-docker/) and
+[Node.js 24+](https://nodejs.org/) - Trivy, Redis and the vulnerability database all come from
+containers, so there is nothing else to install.
+
+**Terminal 1 - the API:**
+
+```bash
+git clone https://github.com/nodeleaks/code-guardian.git
+cd code-guardian
+docker compose up --build
+```
+
+The first run downloads Trivy's ~1.3GB vulnerability database into a named volume. That takes a
+few minutes and happens once - it looks like a hang, but it isn't. The stack is ready when you
+see `Code Guardian listening on http://localhost:3000/graphql`.
+
+**Terminal 2 - the web UI:**
+
+```bash
+cd code-guardian/web
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Open <http://localhost:5173>, paste a public GitHub repository URL - for example
+`https://github.com/nodeleaks/NodeGoat` - and press **Start**. The scan runs in the background
+and the page polls until it finishes.
+
+The default ports already line up (`VITE_API_URL` → 3000, `CORS_ORIGIN` → 5173), so no
+configuration is needed. To run the API without Docker, or to understand why the stack is split
+this way, see [Running it](#running-it).
+
 ## Table of contents
 
 - [Code Guardian](#code-guardian)
+  - [Quick start](#quick-start)
   - [Table of contents](#table-of-contents)
   - [Architecture](#architecture)
     - [Why memory stays bounded](#why-memory-stays-bounded)
