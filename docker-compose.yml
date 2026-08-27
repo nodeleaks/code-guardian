@@ -34,6 +34,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Must match `app` below. Both services share one `image` tag, so if
+        # only one of them pinned the version the two build definitions would
+        # differ and the tag would go to whichever built last.
+        TRIVY_VERSION: v0.74.0
     # `image` is shared with `app` so the (identical) build is only done once.
     image: code-guardian-app
     command:
@@ -53,8 +58,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      # args:
-      #   TRIVY_VERSION: v0.56.2   # uncomment + pin for reproducible builds
+      args:
+        # Pinned so a build today and a build in six months install the same
+        # scanner. Left unset, the Dockerfile pipes install.sh from Trivy's
+        # `main` branch and takes whatever is latest, so the image would drift
+        # without a single change in this repo. Bump deliberately.
+        TRIVY_VERSION: v0.74.0
     image: code-guardian-app
     ports:
       - '3000:3000'

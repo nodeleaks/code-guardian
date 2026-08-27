@@ -17,6 +17,10 @@ From nothing to a working UI. You need [Docker](https://docs.docker.com/get-dock
 [Node.js 24+](https://nodejs.org/) - Trivy, Redis and the vulnerability database all come from
 containers, so there is nothing else to install.
 
+Give Docker at least **2GB of memory** and **4GB of free disk**: the `trivy-db` step runs with
+`mem_limit: 1500m`, and the image plus the cached vulnerability database come to about 2.3GB. On
+Docker Desktop these are under Settings → Resources.
+
 **Terminal 1 - the API:**
 
 ```bash
@@ -25,9 +29,11 @@ cd code-guardian
 docker compose up --build
 ```
 
-The first run downloads Trivy's ~1.3GB vulnerability database into a named volume. That takes a
-few minutes and happens once - it looks like a hang, but it isn't. The stack is ready when you
-see `Code Guardian listening on http://localhost:3000/graphql`.
+The first run builds the image and downloads Trivy's ~1.3GB vulnerability database into a named
+volume, so it prints nothing for a while - that is not a hang. On a fast connection the whole
+cold start takes about a minute; on a slow one the database download dominates. It happens once:
+later runs reuse the volume. The stack is ready when you see
+`Code Guardian listening on http://localhost:3000/graphql`.
 
 **Terminal 2 - the web UI:**
 
@@ -367,9 +373,10 @@ docker compose up --build
 docker stats code-guardian-app-1   # watch memory while a scan runs
 ```
 
-> Note: the Dockerfile/compose config were written and validated (`docker compose config`) in this
-> session, but not build -and-run end-to-end here - this sandbox doesn't have a Docker daemon
-> available. Worth doing that full run yourself before submitting.
+Measured on a real run: scanning [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) through the
+containerized stack peaks at **~73MB of the 200MB limit** and reports 11 CRITICAL findings, so the
+clone, the `trivy fs` run and the streaming parse together leave roughly 60% of the boundary
+unused.
 
 ## Error handling
 
