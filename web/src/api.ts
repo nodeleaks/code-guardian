@@ -44,6 +44,29 @@ interface GraphQLError {
   };
 }
 
+interface GraphQLResponse<T> {
+  data?: T;
+  errors?: GraphQLError[];
+}
+
+function isGraphQLError(value: unknown): value is GraphQLError {
+  if (typeof value !== 'object' || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  return typeof record.message === 'string';
+}
+
+function isGraphQLResponse<T>(value: unknown): value is GraphQLResponse<T> {
+  if (typeof value !== 'object' || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  if ('errors' in record) {
+    if (!Array.isArray(record.errors) || !record.errors.every(isGraphQLError)) return false;
+  }
+
+  return true;
+}
+
 // NestJS's ValidationPipe (used for StartScanInput) reports the actual
 // class-validator message(s) under extensions.originalError.message, not
 // in the top-level `message` field - GraphQL wraps that as the generic
@@ -75,12 +98,17 @@ async function graphqlRequest<T>(query: string, variables: Record<string, unknow
     throw new Error(`GraphQL request failed: HTTP ${res.status}`);
   }
 
-  let body: { data?: T; errors?: GraphQLError[] };
+  let json: unknown;
   try {
-    body = await res.json();
+    json = await res.json();
   } catch {
     throw new Error('The API returned a response that was not valid JSON.');
   }
+
+  if (!isGraphQLResponse<T>(json)) {
+    throw new Error('The API returned a JSON payload in an unexpected shape.');
+  }
+  const body = json;
 
   if (body.errors?.length) {
     throw new Error(body.errors.map(describeGraphQLError).join('; '));
