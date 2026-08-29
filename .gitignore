@@ -8,3 +8,5 @@ tmp/
 fixtures/*.json
 schema.gql
 *.tsbuildinfo
+.codegraph
+.claude
