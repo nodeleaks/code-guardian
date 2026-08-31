@@ -112,6 +112,39 @@ describe('TrivyStreamParserService', () => {
     );
   });
 
+  it('assigns distinct ids even when the same CVE/package/target repeats', async () => {
+    // Trivy can report the exact same package/CVE/target combination more
+    // than once (e.g. reached via more than one path in the dependency
+    // tree). The `id` field is documented as the GraphQL `ID!`'s stable,
+    // unique key and is used as React's list key on the client - if two
+    // findings collide, list rendering (and pagination) breaks even though
+    // the underlying data is otherwise correct.
+    const filePath = writeFixture(
+      'duplicate.json',
+      JSON.stringify({
+        SchemaVersion: 2,
+        ArtifactName: 'nodegoat',
+        Results: [
+          {
+            Target: 'package-lock.json',
+            Vulnerabilities: [
+              { VulnerabilityID: 'CVE-1', PkgName: 'minimist', Severity: 'CRITICAL' },
+              { VulnerabilityID: 'CVE-1', PkgName: 'minimist', Severity: 'CRITICAL' },
+              { VulnerabilityID: 'CVE-1', PkgName: 'minimist', Severity: 'CRITICAL' },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const sink = collectingSink();
+    await service.extractCriticalVulnerabilities(filePath, sink);
+
+    const ids = sink.all().map((v) => v.id);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+  });
+
   it('ignores a non-array Vulnerabilities value instead of crashing', async () => {
     // A `?.length` truthiness guard passes for an object carrying a `length`
     // property and then throws on `for...of`. That throw happens inside the

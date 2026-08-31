@@ -12,7 +12,7 @@ import {
 const POLL_INTERVAL_MS = 2000;
 // Must stay within the server's own cap (VulnerabilityPageArgs allows 1-200);
 // anything larger is rejected as a validation error rather than truncated.
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 5;
 const IN_PROGRESS_STATUSES = new Set(['QUEUED', 'SCANNING']);
 // After this many consecutive failed polls, stop retrying automatically and
 // let the user decide (rather than silently hammering a dead API forever).
@@ -122,7 +122,7 @@ export default function App() {
       <h1>Code Guardian</h1>
       <p className="subtitle">Scan a public GitHub repository for CRITICAL vulnerabilities.</p>
 
-      <form onSubmit={handleStart} className="scan-form">
+      <form onSubmit={(e) => void handleStart(e)} className="scan-form">
         <input
           type="url"
           placeholder="https://github.com/owner/repo"

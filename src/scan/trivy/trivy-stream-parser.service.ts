@@ -130,7 +130,7 @@ export class TrivyStreamParserService {
               continue;
             }
             totalCount += 1;
-            buffer.push(toCriticalVulnerability(result.Target, vuln));
+            buffer.push(toCriticalVulnerability(result.Target, vuln, totalCount));
           }
 
           if (buffer.length < FLUSH_BATCH_SIZE || failed) {
@@ -198,9 +198,16 @@ export class TrivyStreamParserService {
 function toCriticalVulnerability(
   target: string,
   vuln: TrivyVulnerability,
+  index: number,
 ): CriticalVulnerability {
   return {
-    id: `${target}:${vuln.PkgName}:${vuln.VulnerabilityID}`,
+    // `target:pkg:CVE` alone is not always unique - Trivy can report the same
+    // package/CVE/target combination more than once (e.g. reached via more
+    // than one path in the dependency tree), which broke the `ID!` field's
+    // "stable and unique" contract and, downstream, React's `key={v.id}`
+    // list rendering. The index is the parser's own running count, so it's
+    // already unique and stable across reads (the list is append-only).
+    id: `${index}:${target}:${vuln.PkgName}:${vuln.VulnerabilityID}`,
     vulnerabilityId: vuln.VulnerabilityID,
     pkgName: vuln.PkgName,
     installedVersion: vuln.InstalledVersion,
