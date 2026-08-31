@@ -4,7 +4,13 @@ import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { AppConfig } from '../config/configuration';
 import { randomUUID } from 'node:crypto';
-import { ScanJobData, ScanRecord, ScanStatus, SCAN_QUEUE_NAME } from './interfaces/scan-record.interface';
+import {
+  CriticalVulnerability,
+  ScanJobData,
+  ScanRecord,
+  ScanStatus,
+  SCAN_QUEUE_NAME,
+} from './interfaces/scan-record.interface';
 import { ScanRepository } from './scan.repository';
 import { withTimeout } from '../common/with-timeout';
 
@@ -63,9 +69,7 @@ export class ScanService {
       id,
       repositoryUrl,
       status: ScanStatus.QUEUED,
-      criticalVulnerabilities: [],
       criticalVulnerabilityCount: 0,
-      criticalVulnerabilitiesTruncated: false,
       createdAt: now,
       updatedAt: now,
     };
@@ -95,6 +99,14 @@ export class ScanService {
 
   async getScan(id: string): Promise<ScanRecord | null> {
     return this.scanRepository.findById(id);
+  }
+
+  async getVulnerabilities(
+    id: string,
+    offset: number,
+    limit: number,
+  ): Promise<CriticalVulnerability[]> {
+    return this.scanRepository.getVulnerabilities(id, offset, limit);
   }
 
   /**

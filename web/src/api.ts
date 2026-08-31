@@ -11,13 +11,16 @@ export interface Vulnerability {
   target: string;
 }
 
+/**
+ * Status and counts only. The findings are fetched separately and a page at a
+ * time (see getVulnerabilities) - they are not part of this shape, so the
+ * 2-second poll stays small no matter how many findings a scan produced.
+ */
 export interface Scan {
   id: string;
   repositoryUrl: string;
   status: ScanStatus;
-  criticalVulnerabilities: Vulnerability[];
   criticalVulnerabilityCount: number;
-  criticalVulnerabilitiesTruncated: boolean;
   errorMessage: string | null;
 }
 
@@ -135,9 +138,16 @@ const SCAN_QUERY = /* GraphQL */ `
       repositoryUrl
       status
       criticalVulnerabilityCount
-      criticalVulnerabilitiesTruncated
       errorMessage
-      criticalVulnerabilities {
+    }
+  }
+`;
+
+const VULNERABILITIES_QUERY = /* GraphQL */ `
+  query GetVulnerabilities($id: ID!, $offset: Int!, $limit: Int!) {
+    scan(id: $id) {
+      id
+      criticalVulnerabilities(offset: $offset, limit: $limit) {
         id
         vulnerabilityId
         pkgName
@@ -162,4 +172,20 @@ export async function startScan(repositoryUrl: string): Promise<Pick<Scan, 'id' 
 export async function getScan(id: string): Promise<Scan | null> {
   const data = await graphqlRequest<{ scan: Scan | null }>(SCAN_QUERY, { id });
   return data.scan;
+}
+
+/**
+ * One page of a scan's findings. The server caps `limit` (see
+ * VulnerabilityPageArgs), so asking for more than it allows is a validation
+ * error rather than a very large response.
+ */
+export async function getVulnerabilities(
+  id: string,
+  offset: number,
+  limit: number,
+): Promise<Vulnerability[]> {
+  const data = await graphqlRequest<{
+    scan: { criticalVulnerabilities: Vulnerability[] } | null;
+  }>(VULNERABILITIES_QUERY, { id, offset, limit });
+  return data.scan?.criticalVulnerabilities ?? [];
 }

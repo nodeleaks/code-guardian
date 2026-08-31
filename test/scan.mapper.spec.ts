@@ -8,9 +8,7 @@ describe('ScanMapper', () => {
       id: 'scan-123',
       repositoryUrl: 'https://github.com/owner/repo',
       status: ScanStatus.FINISHED,
-      criticalVulnerabilities: [],
       criticalVulnerabilityCount: 0,
-      criticalVulnerabilitiesTruncated: false,
       createdAt: now,
       updatedAt: now,
     };
@@ -28,20 +26,7 @@ describe('ScanMapper', () => {
       id: 'scan-456',
       repositoryUrl: 'https://github.com/nodeleaks/code-guardian',
       status: ScanStatus.FINISHED,
-      criticalVulnerabilities: [
-        {
-          id: 'vuln-1',
-          vulnerabilityId: 'CVE-2021-1234',
-          pkgName: 'lodash',
-          installedVersion: '4.17.19',
-          fixedVersion: '4.17.21',
-          severity: 'CRITICAL',
-          title: 'Prototype pollution in lodash',
-          target: 'package-lock.json',
-        },
-      ],
       criticalVulnerabilityCount: 5,
-      criticalVulnerabilitiesTruncated: true,
       createdAt: '2026-08-25T10:00:00.000Z',
       updatedAt: '2026-08-25T10:05:00.000Z',
     };
@@ -51,9 +36,7 @@ describe('ScanMapper', () => {
     expect(result.id).toBe(record.id);
     expect(result.repositoryUrl).toBe(record.repositoryUrl);
     expect(result.status).toBe(record.status);
-    expect(result.criticalVulnerabilities).toEqual(record.criticalVulnerabilities);
     expect(result.criticalVulnerabilityCount).toBe(5);
-    expect(result.criticalVulnerabilitiesTruncated).toBe(true);
   });
 
   it('handles missing errorMessage when not present', () => {
@@ -61,9 +44,7 @@ describe('ScanMapper', () => {
       id: 'scan-789',
       repositoryUrl: 'https://github.com/owner/repo',
       status: ScanStatus.FINISHED,
-      criticalVulnerabilities: [],
       criticalVulnerabilityCount: 0,
-      criticalVulnerabilitiesTruncated: false,
       createdAt: '2026-08-25T10:00:00.000Z',
       updatedAt: '2026-08-25T10:00:00.000Z',
     };
@@ -78,9 +59,7 @@ describe('ScanMapper', () => {
       id: 'scan-999',
       repositoryUrl: 'https://github.com/owner/repo',
       status: ScanStatus.FAILED,
-      criticalVulnerabilities: [],
       criticalVulnerabilityCount: 0,
-      criticalVulnerabilitiesTruncated: false,
       errorMessage: '[CLONE_FAILED] Repository not found',
       createdAt: '2026-08-25T10:00:00.000Z',
       updatedAt: '2026-08-25T10:00:00.000Z',
