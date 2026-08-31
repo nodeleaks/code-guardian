@@ -75,6 +75,8 @@ describe('TrivyRunnerService', () => {
         '/path/to/report.json',
         '--scanners',
         'vuln',
+        '--severity',
+        'CRITICAL',
         '--quiet',
         '/path/to/repo',
       ]);

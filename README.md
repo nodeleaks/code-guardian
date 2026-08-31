@@ -422,11 +422,27 @@ temp path never prevents removing the other.
   small regardless of source report size.
 - **Shallow clone (`--depth 1`).** Trivy's filesystem scanner only needs the working tree, not
   history, so cloning is bounded by repo size, not repo history size.
-- **`trivy fs --scanners vuln`** (no `--severity` flag). Trivy could filter to `CRITICAL` itself
-  at scan time, which would sidestep needing to stream-filter at all - deliberately not done here,
-  since the assignment's point is to demonstrate handling the unfiltered, huge output correctly.
-  Combining both (`--severity` at the Trivy layer *and* streaming) would be the pragmatic choice
-  in a real system.
+- **Both filtering layers are on: `trivy fs --scanners vuln --severity CRITICAL`, *and* the
+  streaming filter.** Trivy discarding the other severities before it writes the report is what
+  makes the file on disk small - fewer bytes for `createReadStream` to read and fewer tokens for
+  `stream-json` to tokenize, which is where the actual saving is. It is *not* a saving in the
+  parser's `for` loop: that loop is needed regardless, because it also produces `totalCount` and
+  applies `MAX_RETAINED_VULNERABILITIES`.
+
+  The parser's own `Severity !== 'CRITICAL'` check is deliberately kept rather than deleted as
+  now-dead code. It is validation at the boundary with an external process, not a redundant
+  internal invariant: nothing in the type system proves that the installed binary (whose version
+  and path are operator-supplied via `TRIVY_VERSION` / `TRIVY_BINARY_PATH`) honours `--severity`.
+  Should that flag ever be dropped in a refactor of `runFilesystemScan`, the parser keeps
+  returning a correct result instead of silently writing LOW findings into Redis labelled
+  CRITICAL. The cost is one string comparison per vulnerability, against a pipeline already
+  dominated by file I/O.
+
+  Filtering at the Trivy layer does not weaken what this project set out to demonstrate. Handling
+  unfiltered, 500MB+ output in bounded memory is proven independently of whatever `trivy fs`
+  happens to emit - by the synthetic fixture in `scripts/generate-large-trivy-report.ts` (which
+  deliberately makes only 1 in 20 findings CRITICAL) and by the adversarial fixture in
+  `test/trivy-stream-parser.spec.ts` (where *every* finding is CRITICAL, exercising the cap).
 - **Job retries are disabled** (`attempts: 1`). Failures are already captured and reported via
   the scan record's `FAILED` status; a BullMQ-level retry would re-run clone+scan+cleanup against
   a job that already reported failure, which isn't obviously more useful for this use case than
