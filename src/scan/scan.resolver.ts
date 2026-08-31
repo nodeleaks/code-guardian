@@ -1,7 +1,9 @@
-import { Args, ID, Mutation, Query, Resolver } from '@nestjs/graphql';
+import { Args, ID, Mutation, Parent, Query, ResolveField, Resolver } from '@nestjs/graphql';
 import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { StartScanInput } from './dto/start-scan.input';
+import { VulnerabilityPageArgs } from './dto/vulnerability-page.args';
 import { ScanType } from './graphql/scan.type';
+import { VulnerabilityType } from './graphql/vulnerability.type';
 import { toScanType } from './scan.mapper';
 import { ScanService } from './scan.service';
 
@@ -40,5 +42,25 @@ export class ScanResolver {
   async scan(@Args('id', { type: () => ID }) id: string): Promise<ScanType | null> {
     const record = await this.scanService.getScan(id);
     return record ? toScanType(record) : null;
+  }
+
+  /**
+   * One page of a scan's findings, read straight from the Redis list rather
+   * than from the scan record. A separate field rather than a property so
+   * that a caller polling for status alone never pays to read the findings -
+   * and so a caller who does want them can never ask for more than
+   * VulnerabilityPageArgs allows in one request.
+   *
+   * `criticalVulnerabilityCount` on the parent is the total to page through.
+   */
+  @SkipThrottle()
+  @ResolveField(() => [VulnerabilityType], {
+    description: 'A page of this scan\'s CRITICAL findings, in the order they were parsed.',
+  })
+  async criticalVulnerabilities(
+    @Parent() scan: ScanType,
+    @Args() { offset, limit }: VulnerabilityPageArgs,
+  ): Promise<VulnerabilityType[]> {
+    return this.scanService.getVulnerabilities(scan.id, offset, limit);
   }
 }

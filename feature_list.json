@@ -28,9 +28,32 @@
       "evidence": [
         "npm run test -> 12 suites / 127 tests passed, 2026-08-31",
         "npx tsc --noEmit -> No errors found (exit 0), 2026-08-31",
-        "npx eslint on both changed files -> No issues found (exit 0), 2026-08-31"
+        "npx eslint on both changed files -> No issues found (exit 0), 2026-08-31",
+        "End-to-end via `docker compose up --build`: scan reached FINISHED and reported a non-zero CRITICAL count, confirming the pinned TRIVY_VERSION v0.74.0 accepts --severity CRITICAL and does not over-filter. Run manually by the user, not by an automated test."
       ],
       "notes": "Implements the third trade-off documented in README 'Trade-offs and design notes'. The Severity !== 'CRITICAL' check in trivy-stream-parser.service.ts is deliberately retained: it is boundary validation against an external process, not a redundant internal invariant."
+    },
+    {
+      "id": "paginated-vulnerability-list",
+      "priority": 2,
+      "area": "api",
+      "title": "Store every CRITICAL finding in Redis and serve it via offset/limit pagination",
+      "user_visible_behavior": "The full vulnerability list can be browsed page by page instead of being capped at the first 2000 findings. `criticalVulnerabilities(offset, limit)` returns a slice, `criticalVulnerabilityCount` is the true total, and the web UI pages through it with Prev/Next.",
+      "status": "passing",
+      "verification": [
+        "npm run test",
+        "npx tsc --noEmit",
+        "npm --prefix web run typecheck",
+        "node --max-old-space-size=150 scripts/oom-check.js fixtures/huge-trivy-report.json"
+      ],
+      "evidence": [
+        "npm run test -> 13 suites / 149 tests passed, 2026-08-31",
+        "npx tsc --noEmit -> No errors found (exit 0); npx eslint on src/ and test/ -> exit 0",
+        "npm --prefix web run typecheck -> exit 0",
+        "OOM self-test on a 539MB / 112,500-CRITICAL fixture: all 112,500 findings streamed to the sink in 215 batches, largest batch 525. Parses successfully down to --max-old-space-size=25, which retaining the findings could not do - direct evidence the buffer stays bounded.",
+        "Memory delta measured against the previous truncating parser on the same machine and fixture: ~203MB RSS before, ~214MB after (~5%). The ~124MB figure previously recorded in README does not reproduce on this machine even with the old code."
+      ],
+      "notes": "Findings move out of the scan:<id> JSON record into a scan:<id>:vulns Redis list, written in batches during the stream parse so nothing accumulates in JS memory. Removes MAX_RETAINED_VULNERABILITIES and the criticalVulnerabilitiesTruncated flag. Not verified by automated tests: the LRANGE/RPUSH path against a live Redis (the ioredis client is mocked throughout) and the browser behaviour of the Prev/Next controls."
     }
   ]
 }

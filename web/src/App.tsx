@@ -1,7 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { errorMessage, getScan, isValidRepositoryUrl, startScan, type Scan } from './api';
+import {
+  errorMessage,
+  getScan,
+  getVulnerabilities,
+  isValidRepositoryUrl,
+  startScan,
+  type Scan,
+  type Vulnerability,
+} from './api';
 
 const POLL_INTERVAL_MS = 2000;
+// Must stay within the server's own cap (VulnerabilityPageArgs allows 1-200);
+// anything larger is rejected as a validation error rather than truncated.
+const PAGE_SIZE = 50;
 const IN_PROGRESS_STATUSES = new Set(['QUEUED', 'SCANNING']);
 // After this many consecutive failed polls, stop retrying automatically and
 // let the user decide (rather than silently hammering a dead API forever).
@@ -86,9 +97,7 @@ export default function App() {
         id: started.id,
         repositoryUrl: trimmed,
         status: started.status,
-        criticalVulnerabilities: [],
         criticalVulnerabilityCount: 0,
-        criticalVulnerabilitiesTruncated: false,
         errorMessage: null,
       });
     } catch (err) {
@@ -144,6 +153,54 @@ export default function App() {
 }
 
 function ScanResult({ scan }: { scan: Scan }) {
+  const [page, setPage] = useState(0);
+  const [vulnerabilities, setVulnerabilities] = useState<Vulnerability[]>([]);
+  const [loadingPage, setLoadingPage] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
+
+  const total = scan.criticalVulnerabilityCount;
+  const pageCount = Math.ceil(total / PAGE_SIZE);
+  const finished = scan.status === 'FINISHED';
+
+  // A new scan reuses this component, so reset to the first page rather than
+  // leaving the previous scan's page number pointing into a shorter list.
+  useEffect(() => {
+    setPage(0);
+  }, [scan.id]);
+
+  useEffect(() => {
+    if (!finished || total === 0) {
+      setVulnerabilities([]);
+      return;
+    }
+
+    // Separate from App's poll loop on purpose: that one stops once the scan
+    // reaches FINISHED, which is exactly when paging starts.
+    let cancelled = false;
+    setLoadingPage(true);
+    setPageError(null);
+
+    getVulnerabilities(scan.id, page * PAGE_SIZE, PAGE_SIZE)
+      .then((rows) => {
+        if (cancelled) return;
+        setVulnerabilities(rows);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setPageError(errorMessage(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingPage(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [scan.id, finished, total, page]);
+
+  const firstShown = page * PAGE_SIZE + 1;
+  const lastShown = Math.min((page + 1) * PAGE_SIZE, total);
+
   return (
     <section className="result">
       <div className="status-row">
@@ -155,37 +212,59 @@ function ScanResult({ scan }: { scan: Scan }) {
 
       {scan.status === 'FAILED' && <p className="error">{scan.errorMessage ?? 'Scan failed.'}</p>}
 
-      {scan.status === 'FINISHED' && (
+      {finished && (
         <>
           <p>
-            {scan.criticalVulnerabilityCount} CRITICAL vulnerabilit
-            {scan.criticalVulnerabilityCount === 1 ? 'y' : 'ies'} found
-            {scan.criticalVulnerabilitiesTruncated && ' (list truncated)'}
+            {total} CRITICAL vulnerabilit{total === 1 ? 'y' : 'ies'} found
           </p>
 
-          {scan.criticalVulnerabilities.length > 0 && (
-            <table>
-              <thead>
-                <tr>
-                  <th>CVE</th>
-                  <th>Package</th>
-                  <th>Installed</th>
-                  <th>Fixed in</th>
-                  <th>Target</th>
-                </tr>
-              </thead>
-              <tbody>
-                {scan.criticalVulnerabilities.map((v) => (
-                  <tr key={v.id}>
-                    <td title={v.title ?? undefined}>{v.vulnerabilityId}</td>
-                    <td>{v.pkgName}</td>
-                    <td>{v.installedVersion ?? '—'}</td>
-                    <td>{v.fixedVersion ?? '—'}</td>
-                    <td>{v.target}</td>
+          {pageError && <p className="error">{pageError}</p>}
+
+          {total > 0 && (
+            <>
+              <div className="pagination">
+                <span>
+                  Showing {firstShown}–{lastShown} of {total}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  disabled={page === 0 || loadingPage}
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+                  disabled={page >= pageCount - 1 || loadingPage}
+                >
+                  Next
+                </button>
+              </div>
+
+              <table>
+                <thead>
+                  <tr>
+                    <th>CVE</th>
+                    <th>Package</th>
+                    <th>Installed</th>
+                    <th>Fixed in</th>
+                    <th>Target</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {vulnerabilities.map((v) => (
+                    <tr key={v.id}>
+                      <td title={v.title ?? undefined}>{v.vulnerabilityId}</td>
+                      <td>{v.pkgName}</td>
+                      <td>{v.installedVersion ?? '—'}</td>
+                      <td>{v.fixedVersion ?? '—'}</td>
+                      <td>{v.target}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
           )}
         </>
       )}

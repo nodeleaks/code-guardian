@@ -1,7 +1,33 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TrivyStreamParserService } from '../src/scan/trivy/trivy-stream-parser.service';
+import {
+  TrivyStreamParserService,
+  type CriticalVulnerabilitySink,
+} from '../src/scan/trivy/trivy-stream-parser.service';
+import type { CriticalVulnerability } from '../src/scan/interfaces/scan-record.interface';
+
+/**
+ * Stands in for the Redis-backed sink. Records each batch separately rather
+ * than only the flattened result, so tests can assert on how the parser
+ * chunked its output, not just on what it produced.
+ */
+function collectingSink(): CriticalVulnerabilitySink & {
+  batches: CriticalVulnerability[][];
+  all: () => CriticalVulnerability[];
+} {
+  const batches: CriticalVulnerability[][] = [];
+  return {
+    batches,
+    all: () => batches.flat(),
+    write: (batch) => {
+      // Copy: the parser reuses/clears its buffer, and holding the same array
+      // would let a later mutation rewrite what we already "stored".
+      batches.push([...batch]);
+      return Promise.resolve();
+    },
+  };
+}
 
 describe('TrivyStreamParserService', () => {
   let dir: string;
@@ -63,13 +89,12 @@ describe('TrivyStreamParserService', () => {
       }),
     );
 
-    const { vulnerabilities, totalCount, truncated } =
-      await service.extractCriticalVulnerabilities(filePath);
+    const sink = collectingSink();
+    const { totalCount } = await service.extractCriticalVulnerabilities(filePath, sink);
 
     expect(totalCount).toBe(2);
-    expect(truncated).toBe(false);
-    expect(vulnerabilities).toHaveLength(2);
-    expect(vulnerabilities).toEqual(
+    expect(sink.all()).toHaveLength(2);
+    expect(sink.all()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           vulnerabilityId: 'CVE-2',
@@ -107,11 +132,12 @@ describe('TrivyStreamParserService', () => {
       }),
     );
 
-    const result = await service.extractCriticalVulnerabilities(file);
+    const sink = collectingSink();
+    const result = await service.extractCriticalVulnerabilities(file, sink);
 
     expect(result.totalCount).toBe(1);
-    expect(result.vulnerabilities).toHaveLength(1);
-    expect(result.vulnerabilities[0].target).toBe('good');
+    expect(sink.all()).toHaveLength(1);
+    expect(sink.all()[0].target).toBe('good');
   });
 
   it('rejects a well-formed JSON file that has no Results key', async () => {
@@ -124,7 +150,9 @@ describe('TrivyStreamParserService', () => {
       JSON.stringify({ SchemaVersion: 2, ArtifactName: 'nodegoat' }),
     );
 
-    await expect(service.extractCriticalVulnerabilities(filePath)).rejects.toMatchObject({
+    await expect(
+      service.extractCriticalVulnerabilities(filePath, collectingSink()),
+    ).rejects.toMatchObject({
       name: 'ScanEngineError',
       code: 'PARSE_FAILED',
     });
@@ -137,17 +165,50 @@ describe('TrivyStreamParserService', () => {
     // a legitimately clean repository. Only the token stream separates them.
     const filePath = writeFixture('empty-results.json', JSON.stringify({ Results: [] }));
 
-    const result = await service.extractCriticalVulnerabilities(filePath);
+    const sink = collectingSink();
+    const result = await service.extractCriticalVulnerabilities(filePath, sink);
 
     expect(result.totalCount).toBe(0);
-    expect(result.truncated).toBe(false);
-    expect(result.vulnerabilities).toEqual([]);
+    expect(sink.all()).toEqual([]);
   });
 
   it('rejects with a ScanEngineError when the file is not valid JSON', async () => {
     const filePath = writeFixture('broken.json', '{ this is not json');
 
-    await expect(service.extractCriticalVulnerabilities(filePath)).rejects.toMatchObject({
+    await expect(
+      service.extractCriticalVulnerabilities(filePath, collectingSink()),
+    ).rejects.toMatchObject({
+      name: 'ScanEngineError',
+      code: 'PARSE_FAILED',
+    });
+  });
+
+  it('surfaces a sink failure as PARSE_FAILED rather than an unhandled rejection', async () => {
+    // The sink writes to Redis in production, so it can fail independently of
+    // the file being parsed. That failure happens inside a promise chain
+    // started from a 'data' listener, which is exactly where an unhandled
+    // rejection would hide - it has to reach the caller as a scan error.
+    const targets = 20;
+    const results = Array.from({ length: targets }, (_, t) => ({
+      Target: `target-${t}`,
+      Vulnerabilities: Array.from({ length: 100 }, (_, v) => ({
+        VulnerabilityID: `CVE-${t}-${v}`,
+        PkgName: `pkg-${v}`,
+        Severity: 'CRITICAL',
+      })),
+    }));
+    const filePath = writeFixture(
+      'sink-failure.json',
+      JSON.stringify({ SchemaVersion: 2, Results: results }),
+    );
+
+    const failingSink: CriticalVulnerabilitySink = {
+      write: () => Promise.reject(new Error('redis is down')),
+    };
+
+    await expect(
+      service.extractCriticalVulnerabilities(filePath, failingSink),
+    ).rejects.toMatchObject({
       name: 'ScanEngineError',
       code: 'PARSE_FAILED',
     });
@@ -166,20 +227,20 @@ describe('TrivyStreamParserService', () => {
     }));
     const filePath = writeFixture('large.json', JSON.stringify({ SchemaVersion: 2, Results: results }));
 
-    const { vulnerabilities, totalCount, truncated } =
-      await service.extractCriticalVulnerabilities(filePath);
+    const sink = collectingSink();
+    const { totalCount } = await service.extractCriticalVulnerabilities(filePath, sink);
 
-    // Exactly one CRITICAL vulnerability was seeded per target, and 500 is
-    // comfortably under the retention cap, so nothing should be truncated.
+    // Exactly one CRITICAL vulnerability was seeded per target.
     expect(totalCount).toBe(targets);
-    expect(vulnerabilities).toHaveLength(targets);
-    expect(truncated).toBe(false);
+    expect(sink.all()).toHaveLength(targets);
   });
 
-  it('caps the retained list and reports truncation when CRITICAL findings vastly exceed the cap', async () => {
-    // Adversarial fixture: every single vulnerability is CRITICAL, well
-    // beyond the MAX_RETAINED_VULNERABILITIES cap - this is the scenario
-    // the cap exists to guard against (see trivy-stream-parser.service.ts).
+  it('stores every finding when CRITICAL findings vastly exceed one batch', async () => {
+    // Adversarial fixture: every single vulnerability is CRITICAL. This used
+    // to be the case where the parser capped what it kept; now nothing is
+    // dropped, so the guarantee under test is the opposite one - everything
+    // counted is also handed to the sink, and it arrives in bounded chunks
+    // rather than as one 5,000-element array.
     const targets = 50;
     const vulnsPerTarget = 100; // 5,000 CRITICAL findings total
     const results = Array.from({ length: targets }, (_, t) => ({
@@ -195,11 +256,46 @@ describe('TrivyStreamParserService', () => {
       JSON.stringify({ SchemaVersion: 2, Results: results }),
     );
 
-    const { vulnerabilities, totalCount, truncated } =
-      await service.extractCriticalVulnerabilities(filePath);
+    const sink = collectingSink();
+    const { totalCount } = await service.extractCriticalVulnerabilities(filePath, sink);
 
-    expect(totalCount).toBe(targets * vulnsPerTarget);
-    expect(vulnerabilities.length).toBeLessThan(totalCount);
-    expect(truncated).toBe(true);
+    const expected = targets * vulnsPerTarget;
+    expect(totalCount).toBe(expected);
+    // Nothing is truncated any more: every counted finding reached the sink.
+    expect(sink.all()).toHaveLength(expected);
+
+    // Memory boundedness is now a property of the batch size, so assert it
+    // directly: no single batch may exceed the flush threshold.
+    expect(sink.batches.length).toBeGreaterThan(1);
+    for (const batch of sink.batches) {
+      expect(batch.length).toBeLessThanOrEqual(500);
+    }
+  });
+
+  it('preserves parse order across batches so pagination is stable', async () => {
+    // Pages are LRANGE slices of an append-only list, so the order the parser
+    // emits findings in is the order clients page through. If batches were
+    // written concurrently this would scramble.
+    const targets = 30;
+    const vulnsPerTarget = 50; // 1,500 findings - several batches
+    const results = Array.from({ length: targets }, (_, t) => ({
+      Target: `target-${t}`,
+      Vulnerabilities: Array.from({ length: vulnsPerTarget }, (_, v) => ({
+        VulnerabilityID: `CVE-${String(t * vulnsPerTarget + v).padStart(5, '0')}`,
+        PkgName: `pkg-${v}`,
+        Severity: 'CRITICAL',
+      })),
+    }));
+    const filePath = writeFixture(
+      'ordered.json',
+      JSON.stringify({ SchemaVersion: 2, Results: results }),
+    );
+
+    const sink = collectingSink();
+    await service.extractCriticalVulnerabilities(filePath, sink);
+
+    const ids = sink.all().map((v) => v.vulnerabilityId);
+    expect(ids).toHaveLength(targets * vulnsPerTarget);
+    expect(ids).toEqual([...ids].sort());
   });
 });

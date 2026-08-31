@@ -39,9 +39,7 @@ describe('ScanService', () => {
 
       expect(result.status).toBe(ScanStatus.QUEUED);
       expect(result.repositoryUrl).toBe('https://github.com/owner/repo');
-      expect(result.criticalVulnerabilities).toEqual([]);
       expect(result.criticalVulnerabilityCount).toBe(0);
-      expect(result.criticalVulnerabilitiesTruncated).toBe(false);
 
       const createdAtDate = new Date(result.createdAt);
       const updatedAtDate = new Date(result.updatedAt);
@@ -156,9 +154,7 @@ describe('ScanService', () => {
         id: 'scan-456',
         repositoryUrl: 'https://github.com/owner/repo',
         status: ScanStatus.FINISHED,
-        criticalVulnerabilities: [],
         criticalVulnerabilityCount: 0,
-        criticalVulnerabilitiesTruncated: false,
         createdAt: '2026-08-25T10:00:00.000Z',
         updatedAt: '2026-08-25T10:05:00.000Z',
       };

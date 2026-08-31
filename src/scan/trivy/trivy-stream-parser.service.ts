@@ -13,18 +13,24 @@ interface StreamArrayItem {
   value: unknown;
 }
 
+/**
+ * Where extracted findings go. Implemented by the caller so this service stays
+ * free of any storage dependency - ScanProcessor passes one backed by Redis,
+ * scripts/oom-check.ts passes one that only counts.
+ */
+export interface CriticalVulnerabilitySink {
+  write(batch: CriticalVulnerability[]): Promise<void>;
+}
+
 export interface CriticalVulnerabilityExtractionResult {
-  vulnerabilities: CriticalVulnerability[];
-  /** True count of CRITICAL findings seen, even if the list above was capped. */
+  /** Number of CRITICAL findings handed to the sink. */
   totalCount: number;
-  /** True if `totalCount` exceeded MAX_RETAINED_VULNERABILITIES and the list was capped. */
-  truncated: boolean;
 }
 
 /**
  * Extracts CRITICAL-severity vulnerabilities from a (potentially 500MB+)
- * Trivy JSON report WITHOUT ever loading the file or the full `Results`
- * array into memory.
+ * Trivy JSON report WITHOUT ever loading the file, the full `Results` array,
+ * or the full set of findings into memory.
  *
  * How it stays memory-safe:
  *  - `fs.createReadStream` reads the file in small chunks, never as a whole.
@@ -36,35 +42,27 @@ export interface CriticalVulnerabilityExtractionResult {
  *    `Results[i]` object - one scan target's findings) and emits a `data`
  *    event per element, then discards it before the next one is built.
  *    The full `Results` array itself is never materialized.
- *  - We keep only vulnerabilities with Severity === 'CRITICAL', and even
- *    that accumulator is capped (see MAX_RETAINED_VULNERABILITIES below) so
- *    a pathological report can't turn "keep only the critical ones" into
- *    its own unbounded-memory problem.
+ *  - Matching findings accumulate only up to FLUSH_BATCH_SIZE before being
+ *    handed to the sink and dropped, so the output side is bounded too - by
+ *    the batch size, not by how many findings the report contains.
  *
- * Backpressure is handled by stream-chain/stream-json internally: the
- * source read stream is paused while downstream processing catches up, so
- * the whole pipeline stays bounded by chunk size, not file size. This is
- * what makes it safe to run under `--max-old-space-size=150` even against
- * a report far bigger than that heap limit (verified - see
- * scripts/oom-check.js and README.md "OOM self-test").
+ * Backpressure is handled on both sides. Upstream, stream-chain/stream-json
+ * pause the source read stream while downstream processing catches up.
+ * Downstream, this service pauses the pipeline itself while a batch is being
+ * written (see the flush logic below), because the sink is async and the
+ * `data` handler is not. This is what makes it safe to run under
+ * `--max-old-space-size=150` even against a report far bigger than that heap
+ * limit (verified - see scripts/oom-check.js and README.md "OOM self-test").
  *
- * Trade-offs worth calling out:
- *  1. A single `Results[i]` element (one target's full `Vulnerabilities`
- *     array) IS assembled in memory before we scan it. For Trivy reports
- *     this is fine in practice - the 500MB+ scenario comes from having very
- *     many targets/layers, not one target with millions of vulnerabilities.
- *     If that assumption ever breaks, the same `pick`+`stream` technique
- *     can be nested one level deeper (stream `Results[i].Vulnerabilities`
- *     itself) at the cost of a slightly more complex pipeline.
- *  2. The list of CRITICAL vulnerabilities returned to the API is capped at
- *     MAX_RETAINED_VULNERABILITIES. In real-world Trivy output CRITICAL
- *     findings are a small minority - this cap exists purely as a defensive
- *     bound against an adversarial/unexpected report where that assumption
- *     doesn't hold, not because it's expected to be hit. `totalCount` still
- *     reflects the true number found, and `truncated` tells the caller the
- *     list was capped, so nothing is silently dropped without a trace.
+ * Trade-off worth calling out: a single `Results[i]` element (one target's
+ * full `Vulnerabilities` array) IS assembled in memory before we scan it. For
+ * Trivy reports this is fine in practice - the 500MB+ scenario comes from
+ * having very many targets/layers, not one target with millions of
+ * vulnerabilities. If that assumption ever breaks, the same `pick`+`stream`
+ * technique can be nested one level deeper (stream `Results[i].Vulnerabilities`
+ * itself) at the cost of a slightly more complex pipeline.
  */
-const MAX_RETAINED_VULNERABILITIES = 2000;
+const FLUSH_BATCH_SIZE = 500;
 
 @Injectable()
 export class TrivyStreamParserService {
@@ -72,8 +70,9 @@ export class TrivyStreamParserService {
 
   async extractCriticalVulnerabilities(
     filePath: string,
+    sink: CriticalVulnerabilitySink,
   ): Promise<CriticalVulnerabilityExtractionResult> {
-    const vulnerabilities: CriticalVulnerability[] = [];
+    let buffer: CriticalVulnerability[] = [];
     let totalCount = 0;
     let targetsProcessed = 0;
 
@@ -98,6 +97,19 @@ export class TrivyStreamParserService {
 
     try {
       await new Promise<void>((resolve, reject) => {
+        // Serialises sink writes. Without this, two flushes triggered close
+        // together would race and could interleave batches, scrambling the
+        // stored order that pagination depends on.
+        let pending: Promise<void> = Promise.resolve();
+        let failed = false;
+
+        const fail = (err: unknown) => {
+          failed = true;
+          // Normalised to an Error so the rejection reason has a stable
+          // shape; the catch below re-wraps it as a ScanEngineError anyway.
+          reject(err instanceof Error ? err : new Error(String(err)));
+        };
+
         pipeline.on('data', (item: StreamArrayItem) => {
           targetsProcessed += 1;
           const result = item.value as TrivyResult;
@@ -110,18 +122,48 @@ export class TrivyStreamParserService {
             return;
           }
           for (const vuln of result.Vulnerabilities) {
+            // Trivy is already told to filter to CRITICAL (see
+            // TrivyRunnerService), so in practice nothing is skipped here.
+            // Kept as validation at the boundary with an external process:
+            // nothing proves the installed binary honours --severity.
             if (vuln.Severity !== 'CRITICAL') {
               continue;
             }
             totalCount += 1;
-            if (vulnerabilities.length < MAX_RETAINED_VULNERABILITIES) {
-              vulnerabilities.push(toCriticalVulnerability(result.Target, vuln));
-            }
+            buffer.push(toCriticalVulnerability(result.Target, vuln));
           }
+
+          if (buffer.length < FLUSH_BATCH_SIZE || failed) {
+            return;
+          }
+
+          // The sink is async but this handler is not, so awaiting here would
+          // not stop the stream and the buffer would keep growing. Pause
+          // synchronously, hand the batch off, resume once it is written.
+          const batch = buffer;
+          buffer = [];
+          pipeline.pause();
+          pending = pending.then(() => sink.write(batch)).then(
+            () => {
+              if (!failed) {
+                pipeline.resume();
+              }
+            },
+            fail,
+          );
         });
 
-        pipeline.on('error', (err: Error) => reject(err));
-        pipeline.on('end', () => resolve());
+        pipeline.on('error', fail);
+        pipeline.on('end', () => {
+          // Drain whatever the last flush left behind before resolving,
+          // otherwise the tail of the report is silently dropped.
+          pending
+            .then(() => sink.write(buffer))
+            .then(() => {
+              buffer = [];
+              resolve();
+            }, fail);
+        });
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -143,14 +185,13 @@ export class TrivyStreamParserService {
       );
     }
 
-    const truncated = totalCount > vulnerabilities.length;
     this.logger.log(
-      `Parsed ${targetsProcessed} scan target(s) from ${filePath}, found ${totalCount} CRITICAL vulnerabilit${
+      `Parsed ${targetsProcessed} scan target(s) from ${filePath}, stored ${totalCount} CRITICAL vulnerabilit${
         totalCount === 1 ? 'y' : 'ies'
-      }${truncated ? ` (retained first ${vulnerabilities.length}, truncated)` : ''}`,
+      }`,
     );
 
-    return { vulnerabilities, totalCount, truncated };
+    return { totalCount };
   }
 }
 

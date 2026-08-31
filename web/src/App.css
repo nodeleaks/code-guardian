@@ -112,3 +112,32 @@ td {
   color: #c0392b;
   cursor: pointer;
 }
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.8rem 0;
+  font-size: 0.9rem;
+}
+
+/* Pushes the buttons to the right, leaving the "Showing X-Y of N" label
+   aligned with the table beneath it. */
+.pagination span {
+  margin-right: auto;
+  color: #555;
+}
+
+.pagination button {
+  padding: 0.2rem 0.7rem;
+  font-size: 0.85rem;
+  border: 1px solid #999;
+  border-radius: 6px;
+  background: white;
+  cursor: pointer;
+}
+
+.pagination button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
