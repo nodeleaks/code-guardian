@@ -1,6 +1,6 @@
 {
   "project": "code-guardian",
-  "last_updated": "2026-08-28",
+  "last_updated": "2026-08-31",
   "mainRule": "The agent should only have one feature in in_progress at any time",
   "rules": {
     "single_active_feature": true,
@@ -15,18 +15,22 @@
   },
   "features": [
     {
-      "id": "",
+      "id": "trivy-severity-defense-in-depth",
       "priority": 1,
-      "area": "",
-      "title": "",
-      "user_visible_behavior": "",
-      "status": "not_started",
+      "area": "scan",
+      "title": "Add --severity CRITICAL to trivy fs alongside the existing stream filter",
+      "user_visible_behavior": "Trivy pre-filters to CRITICAL before the report ever reaches the app, so the report written to disk is smaller and cheaper to stream-parse. The stream parser still filters, counts and caps independently, so neither layer is a single point of trust for what reaches Redis.",
+      "status": "passing",
       "verification": [
-        ""
+        "npm run test",
+        "npx tsc --noEmit"
       ],
-      "evidence": [],
-      "notes": ""
+      "evidence": [
+        "npm run test -> 12 suites / 127 tests passed, 2026-08-31",
+        "npx tsc --noEmit -> No errors found (exit 0), 2026-08-31",
+        "npx eslint on both changed files -> No issues found (exit 0), 2026-08-31"
+      ],
+      "notes": "Implements the third trade-off documented in README 'Trade-offs and design notes'. The Severity !== 'CRITICAL' check in trivy-stream-parser.service.ts is deliberately retained: it is boundary validation against an external process, not a redundant internal invariant."
     }
   ]
 }
-
