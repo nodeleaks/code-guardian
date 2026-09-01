@@ -122,13 +122,16 @@ with a `stream-chain` / `stream-json` pipeline:
 4. `streamArray()` reassembles **one** `Results[i]` element at a time (one scan target's
    findings), emits it, then discards it before building the next one - the full `Results` array
    is never materialized.
-5. Only vulnerabilities with `Severity === "CRITICAL"` are kept, and even that accumulator is
-   capped (`MAX_RETAINED_VULNERABILITIES = 2000` in the same file) as a defensive bound against a
-   pathological report - see [Trade-offs](#trade-offs-and-design-notes).
+5. Only vulnerabilities with `Severity === "CRITICAL"` are kept, and they accumulate no further
+   than `FLUSH_BATCH_SIZE` (500) before being handed to a sink and dropped. The output side is
+   therefore bounded by the batch size, not by how many findings the report contains.
 
-Backpressure is handled by `stream-chain`/`stream-json` internally, so the whole pipeline is
-bounded by chunk size, not file size - this is what lets it run under `--max-old-space-size=150`
-against a report far bigger than that heap limit.
+Backpressure is handled on both sides. Upstream, `stream-chain`/`stream-json` pause the source
+read stream while downstream processing catches up. Downstream, the parser pauses the pipeline
+itself while a batch is being written, because the sink is async and the `data` handler is not.
+The whole pipeline is bounded by chunk and batch size rather than file size - which is what lets
+it run under `--max-old-space-size=150` against a report far bigger than that heap limit (in
+fact, far below it - see [The OOM self-test](#the-oom-self-test)).
 
 > **Dependency note:** `stream-chain@4.x` and `stream-json@3.x` are ESM-only, which is
 > incompatible with this project's CommonJS NestJS build. This project pins the last CommonJS
@@ -288,8 +291,21 @@ query {
     id
     status
     criticalVulnerabilityCount
-    criticalVulnerabilitiesTruncated
-    criticalVulnerabilities {
+    errorMessage
+  }
+}
+```
+
+`status` moves `QUEUED -> SCANNING -> FINISHED` (or `FAILED`, with `errorMessage` set).
+
+Findings are a separate, paginated field, so polling for status does not drag the whole list back
+on every tick. `criticalVulnerabilityCount` is the total to page through:
+
+```graphql
+query {
+  scan(id: "<id from startScan>") {
+    criticalVulnerabilityCount
+    criticalVulnerabilities(offset: 0, limit: 50) {
       vulnerabilityId
       pkgName
       installedVersion
@@ -297,12 +313,14 @@ query {
       title
       target
     }
-    errorMessage
   }
 }
 ```
 
-`status` moves `QUEUED -> SCANNING -> FINISHED` (or `FAILED`, with `errorMessage` set).
+`offset` defaults to `0` and `limit` to `50`; `limit` is capped at `200` per request. Ordering is
+the order the parser produced findings in, and the stored list is append-only and never reordered,
+so paging with plain offsets is stable - element N is the same finding on every read. Nothing is
+truncated: every CRITICAL finding is reachable by paging.
 
 Per the assignment's setup step, target repository should be your own fork of
 [OWASP NodeGoat](https://github.com/OWASP/NodeGoat) - fork it on GitHub first, then pass your
@@ -313,7 +331,9 @@ something this service does for you).
 
 A small React (Vite + TypeScript) frontend lives in `web/` and drives the API above: enter a
 repository URL, click **Start**, and it polls `scan(id)` every 2 seconds until the scan reaches
-`FINISHED` (or `FAILED`), then renders the CRITICAL vulnerability table. It's a separate app/process
+`FINISHED` (or `FAILED`), then fetches the findings one page at a time and renders them with
+Prev/Next controls and a `Showing X-Y of N` counter. The poll and the page fetch are separate
+requests on purpose: the poll only carries status and counts. It's a separate app/process
 from the API - `docker-compose.yml` does not start it, so it's always run on its own, whether the
 API is running via Docker Compose or `npm run start:dev`.
 
@@ -346,11 +366,28 @@ npm run build
 node --max-old-space-size=150 scripts/oom-check.js fixtures/huge-trivy-report.json
 ```
 
-This has been run against a 539MB generated fixture and completed successfully with peak RSS
-around 124MB - well under the 150MB heap limit - confirming the pipeline never buffers the file
-or the full `Results` array. (`scripts/oom-check.js` runs the compiled `dist/` output directly,
-deliberately bypassing `ts-node` so the TypeScript compiler's own memory use isn't part of what
-you're measuring.)
+Measured against a 539MB generated fixture containing **112,500 CRITICAL findings**, all of which
+are streamed through to the sink - none are dropped. `scripts/oom-check.js` passes a sink that
+counts each batch and discards it, standing in for the Redis-backed one used in production, so
+the code path under measurement is the real one and no Redis is needed.
+
+The decisive result is not an RSS number but the heap ceiling: the same fixture parses
+successfully at **`--max-old-space-size=25`**. Retaining even a fraction of 112,500 findings would
+not fit in a 25MB heap, so this is direct evidence that the output buffer stays bounded by
+`FLUSH_BATCH_SIZE` rather than growing with the number of findings.
+
+Resident set size is a weaker signal and worth reading carefully: on the machine these numbers
+were taken on, this fixture peaks at ~214MB RSS, and it stays in the 190-210MB range whether the
+heap cap is 150MB or 25MB. That flatness is the giveaway - RSS here is dominated by allocator and
+GC headroom plus native stream buffers, not by retained findings. For reference, the previous
+truncating implementation measured ~203MB on the same machine with the same fixture, so removing
+truncation cost roughly 10MB (~5%): the price of actually materialising and handing off 112,500
+findings instead of skipping 110,500 of them at a cap check. An earlier ~124MB figure recorded
+here does not reproduce on this machine even with that old code, so treat RSS as
+environment-dependent and the heap ceiling as the real guarantee.
+
+(`scripts/oom-check.js` runs the compiled `dist/` output directly, deliberately bypassing
+`ts-node` so the TypeScript compiler's own memory use isn't part of what you're measuring.)
 
 Full-service equivalent, per the assignment's suggested check (needs Redis + Trivy running, and a
 real repo to scan rather than a synthetic fixture):
@@ -406,27 +443,51 @@ temp path never prevents removing the other.
   targets/layers, not from one target with millions of vulnerabilities. If that assumption ever
   breaks, the same `pick`+`stream` technique can be nested one level deeper to stream
   `Results[i].Vulnerabilities` itself.
-- **The retained CRITICAL list is capped** (`MAX_RETAINED_VULNERABILITIES = 2000`). In real Trivy
-  output, CRITICAL findings are a small minority of total vulnerabilities - this cap is a
-  defensive bound against an adversarial/unexpected report where that assumption doesn't hold,
-  not something expected to be hit in practice. The true count is always tracked separately
-  (`criticalVulnerabilityCount`) and `criticalVulnerabilitiesTruncated` tells the API caller if
-  the list was capped, so nothing is silently dropped without a trace. This is covered by a unit
-  test (`test/trivy-stream-parser.spec.ts`) using an adversarial fixture where *every*
-  vulnerability is CRITICAL.
+- **Nothing is truncated; findings are paginated instead.** An earlier version capped the
+  retained list at 2,000 findings and reported the overflow via a `criticalVulnerabilitiesTruncated`
+  flag. That kept memory bounded but made the rest of the list unreachable. Findings now live in
+  their own Redis list (`scan:<id>:vulns`), written in batches of 500 as the report is parsed and
+  read back a page at a time, so memory stays bounded at both ends without discarding anything.
+  This is covered by a unit test (`test/trivy-stream-parser.spec.ts`) using an adversarial fixture
+  where *every* vulnerability is CRITICAL: it asserts that every counted finding reaches the sink
+  and that no single batch exceeds the flush size.
+
+  The residual risk that the old cap covered has moved rather than vanished: how much a single
+  scan can put into Redis is now bounded only by `SCAN_MAX_REPO_SIZE_MB` upstream (a repo that
+  large can only carry so many packages) and by `SCAN_RECORD_TTL_SECONDS` expiring the key. There
+  is no longer an explicit ceiling on the number of stored findings. In a deployment where Redis
+  capacity is tight, that ceiling is the thing to add back.
 - **Redis is the source of truth for scan status/results**, kept deliberately separate from the
   BullMQ queue connection (`src/redis/redis.module.ts`) - the queue only needs to know "a job with
   this id exists"; the repository is what the API actually reads from. Records expire after
-  `SCAN_RECORD_TTL_SECONDS` (default 24h) so Redis doesn't grow unbounded over time.
-  Storing only the *filtered-down* critical list (not the raw report) keeps individual records
-  small regardless of source report size.
+  `SCAN_RECORD_TTL_SECONDS` (default 24h) so Redis doesn't grow unbounded over time - the TTL is
+  reapplied to the findings list on every batch, so a scan that dies mid-parse cannot leave an
+  immortal partial list behind. Each scan uses two keys: `scan:<id>` for status and counts, and
+  `scan:<id>:vulns` for the findings. Keeping them apart is what makes the 2-second status poll
+  cheap - it never deserialises a single finding.
 - **Shallow clone (`--depth 1`).** Trivy's filesystem scanner only needs the working tree, not
   history, so cloning is bounded by repo size, not repo history size.
-- **`trivy fs --scanners vuln`** (no `--severity` flag). Trivy could filter to `CRITICAL` itself
-  at scan time, which would sidestep needing to stream-filter at all - deliberately not done here,
-  since the assignment's point is to demonstrate handling the unfiltered, huge output correctly.
-  Combining both (`--severity` at the Trivy layer *and* streaming) would be the pragmatic choice
-  in a real system.
+- **Both filtering layers are on: `trivy fs --scanners vuln --severity CRITICAL`, *and* the
+  streaming filter.** Trivy discarding the other severities before it writes the report is what
+  makes the file on disk small - fewer bytes for `createReadStream` to read and fewer tokens for
+  `stream-json` to tokenize, which is where the actual saving is. It is *not* a saving in the
+  parser's `for` loop: that loop is needed regardless, because it also produces `totalCount` and
+  batches findings out to the sink.
+
+  The parser's own `Severity !== 'CRITICAL'` check is deliberately kept rather than deleted as
+  now-dead code. It is validation at the boundary with an external process, not a redundant
+  internal invariant: nothing in the type system proves that the installed binary (whose version
+  and path are operator-supplied via `TRIVY_VERSION` / `TRIVY_BINARY_PATH`) honours `--severity`.
+  Should that flag ever be dropped in a refactor of `runFilesystemScan`, the parser keeps
+  returning a correct result instead of silently writing LOW findings into Redis labelled
+  CRITICAL. The cost is one string comparison per vulnerability, against a pipeline already
+  dominated by file I/O.
+
+  Filtering at the Trivy layer does not weaken what this project set out to demonstrate. Handling
+  unfiltered, 500MB+ output in bounded memory is proven independently of whatever `trivy fs`
+  happens to emit - by the synthetic fixture in `scripts/generate-large-trivy-report.ts` (which
+  deliberately makes only 1 in 20 findings CRITICAL) and by the adversarial fixture in
+  `test/trivy-stream-parser.spec.ts` (where *every* finding is CRITICAL, exercising the cap).
 - **Job retries are disabled** (`attempts: 1`). Failures are already captured and reported via
   the scan record's `FAILED` status; a BullMQ-level retry would re-run clone+scan+cleanup against
   a job that already reported failure, which isn't obviously more useful for this use case than

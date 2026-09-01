@@ -1,6 +1,5 @@
 import { Field, GraphQLISODateTime, ID, Int, ObjectType } from '@nestjs/graphql';
 import { ScanStatus } from './scan-status.enum';
-import { VulnerabilityType } from './vulnerability.type';
 
 @ObjectType('Scan')
 export class ScanType {
@@ -13,18 +12,15 @@ export class ScanType {
   @Field(() => ScanStatus)
   status!: ScanStatus;
 
-  @Field(() => [VulnerabilityType])
-  criticalVulnerabilities!: VulnerabilityType[];
+  // `criticalVulnerabilities` is intentionally absent here: it is a
+  // paginated @ResolveField on ScanResolver, not a stored property. Querying
+  // a scan's status therefore costs one small Redis GET and does not read the
+  // findings list at all - which matters because clients poll this every 2s.
 
   @Field(() => Int, {
-    description: 'True number of CRITICAL findings, even if the list above was capped.',
+    description: 'Total number of CRITICAL findings, and the total to page through.',
   })
   criticalVulnerabilityCount!: number;
-
-  @Field({
-    description: 'True if criticalVulnerabilityCount exceeded the retained list size.',
-  })
-  criticalVulnerabilitiesTruncated!: boolean;
 
   @Field({ nullable: true })
   errorMessage?: string;

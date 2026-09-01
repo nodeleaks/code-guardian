@@ -11,13 +11,16 @@ export interface Vulnerability {
   target: string;
 }
 
+/**
+ * Status and counts only. The findings are fetched separately and a page at a
+ * time (see getVulnerabilities) - they are not part of this shape, so the
+ * 2-second poll stays small no matter how many findings a scan produced.
+ */
 export interface Scan {
   id: string;
   repositoryUrl: string;
   status: ScanStatus;
-  criticalVulnerabilities: Vulnerability[];
   criticalVulnerabilityCount: number;
-  criticalVulnerabilitiesTruncated: boolean;
   errorMessage: string | null;
 }
 
@@ -42,6 +45,29 @@ interface GraphQLError {
   extensions?: {
     originalError?: { message?: string | string[] };
   };
+}
+
+interface GraphQLResponse<T> {
+  data?: T;
+  errors?: GraphQLError[];
+}
+
+function isGraphQLError(value: unknown): value is GraphQLError {
+  if (typeof value !== 'object' || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  return typeof record.message === 'string';
+}
+
+function isGraphQLResponse<T>(value: unknown): value is GraphQLResponse<T> {
+  if (typeof value !== 'object' || value === null) return false;
+
+  const record = value as Record<string, unknown>;
+  if ('errors' in record) {
+    if (!Array.isArray(record.errors) || !record.errors.every(isGraphQLError)) return false;
+  }
+
+  return true;
 }
 
 // NestJS's ValidationPipe (used for StartScanInput) reports the actual
@@ -75,12 +101,17 @@ async function graphqlRequest<T>(query: string, variables: Record<string, unknow
     throw new Error(`GraphQL request failed: HTTP ${res.status}`);
   }
 
-  let body: { data?: T; errors?: GraphQLError[] };
+  let json: unknown;
   try {
-    body = await res.json();
+    json = await res.json();
   } catch {
     throw new Error('The API returned a response that was not valid JSON.');
   }
+
+  if (!isGraphQLResponse<T>(json)) {
+    throw new Error('The API returned a JSON payload in an unexpected shape.');
+  }
+  const body = json;
 
   if (body.errors?.length) {
     throw new Error(body.errors.map(describeGraphQLError).join('; '));
@@ -107,9 +138,16 @@ const SCAN_QUERY = /* GraphQL */ `
       repositoryUrl
       status
       criticalVulnerabilityCount
-      criticalVulnerabilitiesTruncated
       errorMessage
-      criticalVulnerabilities {
+    }
+  }
+`;
+
+const VULNERABILITIES_QUERY = /* GraphQL */ `
+  query GetVulnerabilities($id: ID!, $offset: Int!, $limit: Int!) {
+    scan(id: $id) {
+      id
+      criticalVulnerabilities(offset: $offset, limit: $limit) {
         id
         vulnerabilityId
         pkgName
@@ -134,4 +172,20 @@ export async function startScan(repositoryUrl: string): Promise<Pick<Scan, 'id' 
 export async function getScan(id: string): Promise<Scan | null> {
   const data = await graphqlRequest<{ scan: Scan | null }>(SCAN_QUERY, { id });
   return data.scan;
+}
+
+/**
+ * One page of a scan's findings. The server caps `limit` (see
+ * VulnerabilityPageArgs), so asking for more than it allows is a validation
+ * error rather than a very large response.
+ */
+export async function getVulnerabilities(
+  id: string,
+  offset: number,
+  limit: number,
+): Promise<Vulnerability[]> {
+  const data = await graphqlRequest<{
+    scan: { criticalVulnerabilities: Vulnerability[] } | null;
+  }>(VULNERABILITIES_QUERY, { id, offset, limit });
+  return data.scan?.criticalVulnerabilities ?? [];
 }

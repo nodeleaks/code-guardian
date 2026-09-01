@@ -41,17 +41,23 @@ export class ScanProcessor extends WorkerHost {
     try {
       this.logger.log(`[${scanId}] Starting scan of ${repositoryUrl}`);
       await this.scanRepository.updateStatus(scanId, ScanStatus.SCANNING);
+      // The findings list is append-only, so a re-run of this job would push
+      // a second copy onto the end of the first. Clear it up front rather
+      // than trusting that a retry never happens.
+      await this.scanRepository.deleteVulnerabilities(scanId);
 
       repoDir = await this.gitCloner.cloneToTemp(repositoryUrl);
       await this.trivyRunner.runFilesystemScan(repoDir, reportFilePath);
-      const { vulnerabilities, totalCount, truncated } =
-        await this.streamParser.extractCriticalVulnerabilities(reportFilePath);
+      const { totalCount } = await this.streamParser.extractCriticalVulnerabilities(
+        reportFilePath,
+        // Findings are written straight through to Redis in batches as they
+        // are parsed, so the full list never exists in this process.
+        { write: (batch) => this.scanRepository.appendVulnerabilities(scanId, batch) },
+      );
 
-      await this.scanRepository.markFinished(scanId, vulnerabilities, totalCount, truncated);
+      await this.scanRepository.markFinished(scanId, totalCount);
       this.logger.log(
-        `[${scanId}] Finished: ${totalCount} CRITICAL vulnerabilit${totalCount === 1 ? 'y' : 'ies'}${
-          truncated ? ` (list truncated to ${vulnerabilities.length})` : ''
-        }`,
+        `[${scanId}] Finished: ${totalCount} CRITICAL vulnerabilit${totalCount === 1 ? 'y' : 'ies'}`,
       );
     } catch (err) {
       // Covers: clone failure, missing/failing trivy binary, timeout,
@@ -71,6 +77,10 @@ export class ScanProcessor extends WorkerHost {
 
       this.logger.error(`[${scanId}] Scan failed: ${logMessage}`);
       await this.scanRepository.markFailed(scanId, toPublicErrorMessage(err));
+      // A parse that died partway through has already pushed some findings.
+      // Left in place they would read as a complete result for a scan that
+      // never completed.
+      await this.scanRepository.deleteVulnerabilities(scanId);
     } finally {
       await this.cleanup(scanId, repoDir, reportFilePath);
     }

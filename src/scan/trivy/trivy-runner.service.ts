@@ -33,6 +33,12 @@ export class TrivyRunnerService {
       outputFilePath,
       '--scanners',
       'vuln',
+      // Defence in depth, paired with the parser's own CRITICAL filter.
+      // Trivy dropping the other severities here is what keeps the report
+      // on disk small; the parser still filters, counts and caps
+      // independently, so neither layer alone decides what reaches Redis.
+      '--severity',
+      'CRITICAL',
       '--quiet',
       repoDir,
     ];

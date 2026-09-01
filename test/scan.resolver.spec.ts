@@ -2,6 +2,8 @@ import { ScanResolver } from '../src/scan/scan.resolver';
 import { ScanService } from '../src/scan/scan.service';
 import { ScanStatus, type ScanRecord } from '../src/scan/interfaces/scan-record.interface';
 import { StartScanInput } from '../src/scan/dto/start-scan.input';
+import type { ScanType } from '../src/scan/graphql/scan.type';
+import type { CriticalVulnerability } from '../src/scan/interfaces/scan-record.interface';
 
 describe('ScanResolver', () => {
   let fakeScanService: jest.Mocked<Partial<ScanService>>;
@@ -11,6 +13,7 @@ describe('ScanResolver', () => {
     fakeScanService = {
       startScan: jest.fn().mockResolvedValue(undefined),
       getScan: jest.fn().mockResolvedValue(null),
+      getVulnerabilities: jest.fn().mockResolvedValue([]),
     };
 
     resolver = new ScanResolver(fakeScanService as unknown as ScanService);
@@ -26,9 +29,7 @@ describe('ScanResolver', () => {
         id: 'scan-123',
         repositoryUrl: 'https://github.com/owner/repo',
         status: ScanStatus.QUEUED,
-        criticalVulnerabilities: [],
         criticalVulnerabilityCount: 0,
-        criticalVulnerabilitiesTruncated: false,
         createdAt: '2026-08-25T10:00:00.000Z',
         updatedAt: '2026-08-25T10:00:00.000Z',
       };
@@ -49,9 +50,7 @@ describe('ScanResolver', () => {
         id: 'scan-456',
         repositoryUrl: 'https://github.com/nodeleaks/code-guardian',
         status: ScanStatus.QUEUED,
-        criticalVulnerabilities: [],
         criticalVulnerabilityCount: 0,
-        criticalVulnerabilitiesTruncated: false,
         createdAt: now,
         updatedAt: now,
       };
@@ -85,9 +84,7 @@ describe('ScanResolver', () => {
         id: 'scan-abc',
         repositoryUrl: 'https://github.com/owner/repo',
         status: ScanStatus.FINISHED,
-        criticalVulnerabilities: [],
         criticalVulnerabilityCount: 0,
-        criticalVulnerabilitiesTruncated: false,
         createdAt: '2026-08-25T10:00:00.000Z',
         updatedAt: '2026-08-25T10:05:00.000Z',
       };
@@ -106,6 +103,41 @@ describe('ScanResolver', () => {
       const result = await resolver.scan('nonexistent');
 
       expect(result).toBeNull();
+    });
+  });
+
+  describe('criticalVulnerabilities', () => {
+    const parent = { id: 'scan-123' } as ScanType;
+
+    it('reads the requested window for the parent scan', async () => {
+      await resolver.criticalVulnerabilities(parent, { offset: 100, limit: 25 });
+
+      expect(fakeScanService.getVulnerabilities).toHaveBeenCalledWith('scan-123', 100, 25);
+    });
+
+    it('returns the findings the service produced', async () => {
+      const page: CriticalVulnerability[] = [
+        {
+          id: 'target:pkg:CVE-1',
+          vulnerabilityId: 'CVE-1',
+          pkgName: 'pkg',
+          severity: 'CRITICAL',
+          target: 'target',
+        },
+      ];
+      (fakeScanService.getVulnerabilities as jest.Mock).mockResolvedValue(page);
+
+      await expect(
+        resolver.criticalVulnerabilities(parent, { offset: 0, limit: 50 }),
+      ).resolves.toEqual(page);
+    });
+
+    it('does not read the findings list when only the scan is queried', async () => {
+      // The point of making this a separate field: a status poll every 2
+      // seconds must not deserialise every finding.
+      await resolver.scan('scan-123');
+
+      expect(fakeScanService.getVulnerabilities).not.toHaveBeenCalled();
     });
   });
 });

@@ -22,6 +22,8 @@ describe('ScanProcessor', () => {
     fakeRepository = {
       updateStatus: jest.fn().mockResolvedValue(undefined),
       markFinished: jest.fn().mockResolvedValue(undefined),
+      appendVulnerabilities: jest.fn().mockResolvedValue(undefined),
+      deleteVulnerabilities: jest.fn().mockResolvedValue(undefined),
       markFailed: jest.fn().mockResolvedValue(undefined),
     };
 
@@ -74,21 +76,22 @@ describe('ScanProcessor', () => {
       const repoDir = mkdtempSync(join(tmpdir(), 'test-repo-'));
       (fakeGitCloner.cloneToTemp as jest.Mock).mockResolvedValue(repoDir);
       (fakeTrivyRunner.runFilesystemScan as jest.Mock).mockResolvedValue(undefined);
-      (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockResolvedValue({
-        vulnerabilities: vulns,
-        totalCount: 1,
-        truncated: false,
-      });
+      // The processor hands the parser a sink rather than receiving a list
+      // back, so drive it the way the real parser would: write one batch.
+      (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockImplementation(
+        async (_path: string, sink: { write: (b: CriticalVulnerability[]) => Promise<void> }) => {
+          await sink.write(vulns);
+          return { totalCount: 1 };
+        },
+      );
 
       await processor.process(fakeJob as Job<ScanJobData>);
 
+      // What the sink is wired to: findings land in the list keyed by scan id.
+      expect(fakeRepository.appendVulnerabilities).toHaveBeenCalledWith('test-scan-123', vulns);
+
       expect(fakeRepository.updateStatus).toHaveBeenCalledWith('test-scan-123', ScanStatus.SCANNING);
-      expect(fakeRepository.markFinished).toHaveBeenCalledWith(
-        'test-scan-123',
-        vulns,
-        1,
-        false,
-      );
+      expect(fakeRepository.markFinished).toHaveBeenCalledWith('test-scan-123', 1);
       expect(fakeRepository.markFailed).not.toHaveBeenCalled();
 
       rmSync(repoDir, { recursive: true, force: true });
@@ -99,9 +102,7 @@ describe('ScanProcessor', () => {
       (fakeGitCloner.cloneToTemp as jest.Mock).mockResolvedValue(repoDir);
       (fakeTrivyRunner.runFilesystemScan as jest.Mock).mockResolvedValue(undefined);
       (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockResolvedValue({
-        vulnerabilities: [],
         totalCount: 0,
-        truncated: false,
       });
 
       await processor.process(fakeJob as Job<ScanJobData>);
@@ -208,9 +209,7 @@ describe('ScanProcessor', () => {
       (fakeGitCloner.cloneToTemp as jest.Mock).mockResolvedValue(repoDir);
       (fakeTrivyRunner.runFilesystemScan as jest.Mock).mockResolvedValue(undefined);
       (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockResolvedValue({
-        vulnerabilities: [],
         totalCount: 0,
-        truncated: false,
       });
 
       await processor.process(fakeJob as Job<ScanJobData>);
@@ -247,9 +246,7 @@ describe('ScanProcessor', () => {
         },
       );
       (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockResolvedValue({
-        vulnerabilities: [],
         totalCount: 0,
-        truncated: false,
       });
 
       await processor.process(fakeJob as Job<ScanJobData>);
@@ -268,6 +265,47 @@ describe('ScanProcessor', () => {
       await expect(processor.process(fakeJob as Job<ScanJobData>)).resolves.toBeUndefined();
 
       expect(fakeRepository.markFailed).toHaveBeenCalled();
+    });
+  });
+
+  describe('vulnerability list lifecycle', () => {
+    it('clears any previous findings before parsing', async () => {
+      // The list is append-only, so a re-run would otherwise push a second
+      // copy onto the end of the first and double every page.
+      const repoDir = mkdtempSync(join(tmpdir(), 'test-repo-'));
+      (fakeGitCloner.cloneToTemp as jest.Mock).mockResolvedValue(repoDir);
+      (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockResolvedValue({
+        totalCount: 0,
+      });
+
+      await processor.process(fakeJob as Job<ScanJobData>);
+
+      expect(fakeRepository.deleteVulnerabilities).toHaveBeenCalledWith('test-scan-123');
+      const deleteOrder = (fakeRepository.deleteVulnerabilities as jest.Mock).mock
+        .invocationCallOrder[0];
+      const parseOrder = (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mock
+        .invocationCallOrder[0];
+      expect(deleteOrder).toBeLessThan(parseOrder);
+
+      rmSync(repoDir, { recursive: true, force: true });
+    });
+
+    it('discards partially written findings when the scan fails', async () => {
+      // A parse that dies partway through has already pushed some batches.
+      // Left behind they would read as a complete result for a FAILED scan.
+      const repoDir = mkdtempSync(join(tmpdir(), 'test-repo-'));
+      (fakeGitCloner.cloneToTemp as jest.Mock).mockResolvedValue(repoDir);
+      (fakeStreamParser.extractCriticalVulnerabilities as jest.Mock).mockRejectedValue(
+        new ScanEngineError('boom', 'PARSE_FAILED'),
+      );
+
+      await processor.process(fakeJob as Job<ScanJobData>);
+
+      expect(fakeRepository.markFailed).toHaveBeenCalled();
+      // Once up front, once after the failure.
+      expect(fakeRepository.deleteVulnerabilities).toHaveBeenCalledTimes(2);
+
+      rmSync(repoDir, { recursive: true, force: true });
     });
   });
 });
